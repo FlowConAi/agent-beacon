@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/asymptote-labs/agent-beacon/cli/beacon/internal/endpoint/schema"
 	"github.com/asymptote-labs/agent-beacon/pkg/asymptoteobserve"
@@ -446,5 +447,37 @@ func TestRetainedLogPathsMatchesWhatRotationKeeps(t *testing.T) {
 	}
 	if got := RetainedLogPaths(""); got != nil {
 		t.Fatalf("RetainedLogPaths(\"\") = %v, want nil", got)
+	}
+}
+
+// The oversized fallback cuts the message to 1 KB; a cut through CJK text must not leave a
+// broken character for json.Marshal to turn into U+FFFD.
+func TestAppendEventTruncatesMultiByteMessageOnACharacterBoundary(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "runtime.jsonl")
+	event := schema.NewEvent(schema.NewEventOptions{
+		Action:  "tool.invoked",
+		Harness: schema.HarnessInfo{Name: "test"},
+		Message: strings.Repeat("界", 2000),
+	})
+	event.Raw = map[string]interface{}{}
+	for i := 0; i < 40; i++ {
+		event.Raw["field"+strconv.Itoa(i)] = strings.Repeat("x", 4096)
+	}
+	if _, err := AppendEvent(event, Options{Path: path, MaxBytes: 16 * 1024}); err != nil {
+		t.Fatalf("AppendEvent returned error: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read log: %v", err)
+	}
+	var decoded schema.Event
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("line is not JSON: %v", err)
+	}
+	if !decoded.Truncated || decoded.Raw != nil {
+		t.Fatalf("expected the oversized fallback to run, truncated=%v raw=%d", decoded.Truncated, len(decoded.Raw))
+	}
+	if len(decoded.Message) > 1024 || strings.ContainsRune(decoded.Message, utf8.RuneError) || !strings.HasSuffix(decoded.Message, "界...[truncated]") {
+		t.Fatalf("message = %d bytes ending %q", len(decoded.Message), decoded.Message[len(decoded.Message)-20:])
 	}
 }

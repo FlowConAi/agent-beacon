@@ -132,6 +132,8 @@ func TestInventoryJobEnvRecordsCodexHomeForUserInstalls(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Chdir(work)
+	t.Setenv("HERMES_HOME", "")
+	t.Setenv("HERMES_DATA_DIR_SUFFIX", "")
 
 	// Relative, so the job, which starts elsewhere, needs the absolute form.
 	t.Setenv("CODEX_HOME", "codex-home")
@@ -150,6 +152,55 @@ func TestInventoryJobEnvRecordsCodexHomeForUserInstalls(t *testing.T) {
 	t.Setenv("CODEX_HOME", "")
 	if got := inventoryJobEnv(true); got != nil {
 		t.Fatalf("env with CODEX_HOME unset = %v, want none", got)
+	}
+}
+
+// launchd and systemd start the job without the user's shell, so HERMES_HOME and the data-dir
+// suffix are recorded in it. HERMES_HOME is recorded as given, before any profile is applied, so a
+// later `hermes profile use` still reaches the job.
+func TestInventoryJobEnvRecordsHermesHomeForUserInstalls(t *testing.T) {
+	home := t.TempDir()
+	testenv.SetHome(t, home)
+	work := t.TempDir()
+	t.Chdir(work)
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CODEX_HOME", "")
+	t.Setenv("HERMES_DATA_DIR_SUFFIX", "")
+
+	// Relative and not created yet: Hermes creates its home, so it is recorded anyway.
+	t.Setenv("HERMES_HOME", "hermes-data")
+	want := filepath.Join(cwd, "hermes-data")
+	if env := inventoryJobEnv(true); len(env) != 1 || env["HERMES_HOME"] != want {
+		t.Fatalf("user mode env = %v, want only HERMES_HOME=%s", env, want)
+	}
+	if env := inventoryJobEnv(false); env != nil {
+		t.Fatalf("system mode env = %v, want none: root's environment is not the console user's", env)
+	}
+
+	// A HERMES_HOME under a root with a sticky profile is still recorded as given.
+	root := filepath.Join(home, ".hermes")
+	if err := os.MkdirAll(filepath.Join(root, "profiles", "work"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "active_profile"), []byte("work\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HERMES_HOME", "~/.hermes")
+	if env := inventoryJobEnv(true); env["HERMES_HOME"] != root {
+		t.Fatalf("user mode env = %v, want HERMES_HOME=%s, not the active profile", env, root)
+	}
+
+	t.Setenv("HERMES_HOME", " ")
+	t.Setenv("HERMES_DATA_DIR_SUFFIX", "-dev")
+	if env := inventoryJobEnv(true); len(env) != 1 || env["HERMES_DATA_DIR_SUFFIX"] != "-dev" {
+		t.Fatalf("user mode env = %v, want only HERMES_DATA_DIR_SUFFIX=-dev", env)
+	}
+	t.Setenv("HERMES_DATA_DIR_SUFFIX", "")
+	if env := inventoryJobEnv(true); env != nil {
+		t.Fatalf("env with nothing set = %v, want none", env)
 	}
 }
 

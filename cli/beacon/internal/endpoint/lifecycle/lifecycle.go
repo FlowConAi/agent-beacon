@@ -22,6 +22,7 @@ import (
 	"github.com/asymptote-labs/agent-beacon/cli/beacon/internal/endpoint/service"
 	"github.com/asymptote-labs/agent-beacon/cli/beacon/internal/endpoint/sysacl"
 	"github.com/asymptote-labs/agent-beacon/cli/beacon/internal/endpoint/writer"
+	"github.com/asymptote-labs/agent-beacon/cli/beacon/internal/hermessession"
 	"github.com/asymptote-labs/agent-beacon/cli/beacon/internal/version"
 )
 
@@ -134,22 +135,35 @@ func reconcileInventoryJobWith(job inventoryJobController, opts InventoryJobOpti
 }
 
 // inventoryJobEnv is the environment written into a per-user inventory job. launchd and systemd
-// start the job without the user's shell environment, so a CODEX_HOME exported in a shell profile
-// would not reach it and the scheduled scan would inventory ~/.codex while Codex reads
-// $CODEX_HOME. The value is resolved now, from the install's shell, as Codex resolves it: an
-// absolute path, so a relative CODEX_HOME still means the directory it named at install time. An
-// unset or invalid CODEX_HOME records nothing, and the job falls back to ~/.codex as before.
+// start the job without the user's shell environment, so a CODEX_HOME or HERMES_HOME exported in a
+// shell profile would not reach it and the scheduled scan would inventory ~/.codex or ~/.hermes
+// while the runtime reads another directory. The values are resolved now, from the install's shell,
+// as each runtime resolves them: absolute paths, so a relative value still means the directory it
+// named at install time. An unset or invalid CODEX_HOME records nothing, and the job falls back to
+// ~/.codex as before; likewise for an unset HERMES_HOME and HERMES_DATA_DIR_SUFFIX. HERMES_HOME is
+// recorded before profiles are applied, so the job still follows a later `hermes profile use`.
 //
 // System mode records nothing: this process's environment is root's, not the console user's.
 func inventoryJobEnv(userMode bool) map[string]string {
-	if !userMode || os.Getenv("CODEX_HOME") == "" {
+	if !userMode {
 		return nil
 	}
-	dir, err := codexsession.HomeDir("")
-	if err != nil {
+	env := map[string]string{}
+	if os.Getenv("CODEX_HOME") != "" {
+		if dir, err := codexsession.HomeDir(""); err == nil {
+			env["CODEX_HOME"] = dir
+		}
+	}
+	if dir, err := hermessession.HomeOverride(""); err == nil && dir != "" {
+		env["HERMES_HOME"] = dir
+	}
+	if suffix := os.Getenv("HERMES_DATA_DIR_SUFFIX"); suffix != "" {
+		env["HERMES_DATA_DIR_SUFFIX"] = suffix
+	}
+	if len(env) == 0 {
 		return nil
 	}
-	return map[string]string{"CODEX_HOME": dir}
+	return env
 }
 
 // inventoryEnabledFromConfigFile reads only the inventory_heartbeat.enabled key. A missing or

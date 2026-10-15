@@ -59,15 +59,36 @@ func HomeOverride(home string) (string, error) {
 	return absolute, nil
 }
 
+// ErrUnusableProfile is matched (errors.Is) by the error HomeDir returns when active_profile names
+// a profile Hermes cannot use. Hermes will not start until it is fixed, but nothing else about the
+// installation is wrong, so callers that only read or remove what is already on disk can fall back
+// to the base directory (FallbackHomeDir), and a sweep over every runtime can report it and move on.
+var ErrUnusableProfile = errors.New("unusable Hermes active profile")
+
+// profileError carries the message for one unusable active_profile and matches ErrUnusableProfile.
+type profileError struct{ msg string }
+
+func (e *profileError) Error() string        { return e.msg }
+func (e *profileError) Is(target error) bool { return target == ErrUnusableProfile }
+
+// FallbackHomeDir is HomeDir for finding what is already on disk. When HomeDir fails it returns the
+// base directory, the one Hermes uses before profiles are applied and which holds whatever Hermes
+// and Beacon wrote there before the profile went bad, along with HomeDir's error; dir is empty when
+// there is no base either.
+func FallbackHomeDir(home string) (dir string, err error) {
+	base, dir, err := resolveHome(home)
+	if err != nil {
+		return base, err
+	}
+	return dir, nil
+}
+
 // DefaultDBPath is the state.db in HomeDir. When the active profile cannot be used, Hermes writes
 // nothing new anywhere, so status, sync and handoff keep reading the base directory's store, which
 // holds whatever Hermes wrote there before.
 func DefaultDBPath() string {
 	home, _ := os.UserHomeDir()
-	base, dir, err := resolveHome(strings.TrimSpace(home))
-	if err != nil {
-		dir = base
-	}
+	dir, _ := FallbackHomeDir(strings.TrimSpace(home))
 	if dir == "" {
 		dir = filepath.Join(os.TempDir(), "hermes")
 	}
@@ -177,11 +198,11 @@ func profileDir(root, name string) (string, error) {
 	}
 	activePath := filepath.Join(root, "active_profile")
 	if !hermesProfileName.MatchString(canonical) || hermesReservedProfiles[canonical] {
-		return "", fmt.Errorf("Hermes active profile %q in %s is not a valid profile name", name, activePath)
+		return "", &profileError{fmt.Sprintf("Hermes active profile %q in %s is not a valid profile name", name, activePath)}
 	}
 	dir := filepath.Join(root, "profiles", canonical)
 	if info, err := sessionfs.Stat(dir); err != nil || !info.IsDir() {
-		return "", fmt.Errorf("Hermes active profile %q in %s does not exist: %s is not a directory", name, activePath, dir)
+		return "", &profileError{fmt.Sprintf("Hermes active profile %q in %s does not exist: %s is not a directory", name, activePath, dir)}
 	}
 	return dir, nil
 }

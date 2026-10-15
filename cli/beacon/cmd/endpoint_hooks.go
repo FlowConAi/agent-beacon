@@ -2,12 +2,14 @@ package cmd
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
 
 	endpointconfig "github.com/asymptote-labs/agent-beacon/cli/beacon/internal/endpoint/config"
 	endpointhooks "github.com/asymptote-labs/agent-beacon/cli/beacon/internal/endpoint/hooks"
+	"github.com/asymptote-labs/agent-beacon/cli/beacon/internal/hermessession"
 	"github.com/spf13/cobra"
 )
 
@@ -52,10 +54,26 @@ func runEndpointHooksInstall(cmd *cobra.Command, args []string) error {
 	cfg := loadOrDefaultConfig()
 	for _, name := range targets {
 		if err := installEndpointHookTarget(name, cfg); err != nil {
+			if endpointOpts.allTargets && skipInAllHookSweep(name, err) {
+				fmt.Fprintf(cmd.ErrOrStderr(), "Warning: %s hooks were not installed: %v\n", name, err)
+				fmt.Fprintf(cmd.ErrOrStderr(), "Fix the Hermes profile, then run: beacon endpoint hooks install --harness %s\n", name)
+				continue
+			}
 			return err
 		}
 	}
 	return nil
+}
+
+// skipInAllHookSweep reports whether a target's install error is a problem with that runtime's own
+// setup that --all reports and moves past, rather than one that aborts the sweep and leaves every
+// later target without hooks.
+//
+// Only Hermes's unusable active_profile qualifies: Hermes will not start until the operator fixes
+// it, so there is nowhere correct to write its hooks, and nothing about the other runtimes is
+// wrong. An explicit `--harness hermes` still fails with the error.
+func skipInAllHookSweep(name string, err error) bool {
+	return strings.TrimSpace(name) == "hermes" && errors.Is(err, hermessession.ErrUnusableProfile)
 }
 
 func installEndpointHookTarget(name string, cfg endpointconfig.Config) error {

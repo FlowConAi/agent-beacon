@@ -1,6 +1,7 @@
 package hermessession
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -158,6 +159,13 @@ func TestHomeDirRefusesUnusableActiveProfile(t *testing.T) {
 			dir, err := HomeDir(home)
 			if err == nil || !strings.Contains(err.Error(), tc.want) || !strings.Contains(err.Error(), "active_profile") {
 				t.Fatalf("HomeDir with active_profile %q = %q, %v; want an error saying %q", tc.content, dir, err, tc.want)
+			}
+			if !errors.Is(err, ErrUnusableProfile) {
+				t.Fatalf("HomeDir error %v does not match ErrUnusableProfile", err)
+			}
+			// Readers of what is already on disk fall back to the base directory.
+			if dir, err := FallbackHomeDir(home); dir != native || !errors.Is(err, ErrUnusableProfile) {
+				t.Fatalf("FallbackHomeDir = %q, %v; want %q with the profile error", dir, err, native)
 			}
 			// The session reader keeps reading the base directory's store.
 			if db := DefaultDBPath(); db != filepath.Join(native, "state.db") {

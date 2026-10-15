@@ -1,6 +1,7 @@
 package hooks
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -42,6 +43,18 @@ var hermesRuntime = hookRuntime{
 	isInstalled: isHermesInstalledAt,
 }
 
+// hermesExistingRuntime is hermesRuntime for uninstall and status, which look at hooks already
+// written rather than choosing where new ones go. When the active profile is unusable they look in
+// the base directory, where an install made before the profile went bad put them; install still
+// refuses, because Hermes would never load hooks written there while the profile is selected.
+var hermesExistingRuntime = hookRuntime{
+	displayName: "Hermes Agent",
+	configPath:  hermesExistingConfigPath,
+	install:     installHermesConfig,
+	uninstall:   removeHermesEndpointHooks,
+	isInstalled: isHermesInstalledAt,
+}
+
 func InstallHermes(opts HermesOptions) (HermesStatus, error) {
 	status, err := installRuntimeHooks(hermesRuntime, RuntimeOptions(opts))
 	if err != nil {
@@ -51,19 +64,25 @@ func InstallHermes(opts HermesOptions) (HermesStatus, error) {
 }
 
 func UninstallHermes(opts HermesOptions) (HermesStatus, error) {
-	status, err := uninstallRuntimeHooks(hermesRuntime, RuntimeOptions(opts))
+	status, err := uninstallRuntimeHooks(hermesExistingRuntime, RuntimeOptions(opts))
 	if err != nil {
 		return HermesStatus{}, err
 	}
 	return hermesStatusFromRuntime(status), nil
 }
 
+// HermesHookStatus reports the hooks in the config.yaml Hermes reads, or in the base directory's when
+// the active profile is unusable, with the profile problem appended to the message.
 func HermesHookStatus(opts HermesOptions) HermesStatus {
-	return hermesStatusFromRuntime(runtimeHookStatus(hermesRuntime, RuntimeOptions(opts)))
+	status := hermesStatusFromRuntime(runtimeHookStatus(hermesExistingRuntime, RuntimeOptions(opts)))
+	if _, err := hermesConfigPath(opts.Level); errors.Is(err, hermessession.ErrUnusableProfile) && status.ConfigPath != "" {
+		status.Message = fmt.Sprintf("%s; %v", status.Message, err)
+	}
+	return status
 }
 
 func IsHermesInstalled(opts HermesOptions) bool {
-	return isRuntimeInstalled(hermesRuntime, RuntimeOptions(opts))
+	return isRuntimeInstalled(hermesExistingRuntime, RuntimeOptions(opts))
 }
 
 func hermesStatusFromRuntime(status runtimeStatus) HermesStatus {
@@ -221,14 +240,31 @@ func isHermesInstalledAt(path string) bool {
 	return false
 }
 
+// hermesConfigPath is the config.yaml a plain `hermes` reads, where install writes.
 func hermesConfigPath(level Level) (string, error) {
+	return hermesUserConfigPath(level, hermessession.HomeDir)
+}
+
+// hermesExistingConfigPath is hermesConfigPath, except that an unusable active profile resolves to
+// the base directory's config.yaml instead of an error.
+func hermesExistingConfigPath(level Level) (string, error) {
+	return hermesUserConfigPath(level, func(home string) (string, error) {
+		dir, err := hermessession.FallbackHomeDir(home)
+		if errors.Is(err, hermessession.ErrUnusableProfile) {
+			return dir, nil
+		}
+		return dir, err
+	})
+}
+
+func hermesUserConfigPath(level Level, homeDir func(string) (string, error)) (string, error) {
 	switch level {
 	case "", LevelUser:
 		home, err := os.UserHomeDir()
 		if err != nil {
 			return "", err
 		}
-		dir, err := hermessession.HomeDir(home)
+		dir, err := homeDir(home)
 		if err != nil {
 			return "", err
 		}

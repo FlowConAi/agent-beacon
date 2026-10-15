@@ -54,7 +54,7 @@ Hook install, uninstall and status, discovery, inventory, and session status, sy
 2. A `HERMES_HOME` that already names a profile, `<root>/profiles/<name>`, is used as it is.
 3. Otherwise a sticky profile selected with `hermes profile use <name>`, which Hermes records in `<root>/active_profile`, moves the home to `<root>/profiles/<name>`. The root is the native root when `HERMES_HOME` is unset or inside it, and `HERMES_HOME` itself when it points elsewhere.
 
-When `active_profile` names a profile that is not a valid name or has no directory, Hermes refuses to start. Hook install then returns an error, discovery reports Hermes as `missing` with the reason, and inventory leaves out the Hermes config. Session status, sync and handoff keep reading the base directory's `state.db`.
+When `active_profile` names a profile that is not a valid name or has no directory, Hermes refuses to start. `beacon endpoint hooks install --harness hermes` then returns an error, while `--all` prints a warning for Hermes and installs the other runtimes. Hook uninstall and status use the base directory's `config.yaml`, so hooks written before the profile changed can still be removed. Discovery reports Hermes as `missing` with the reason, and inventory leaves out the Hermes config. Session status, sync and handoff keep reading the base directory's `state.db`.
 
 A profile chosen for a single command with `hermes -p <name>` leaves nothing on disk, so Beacon cannot see it. Its hooks and sessions belong to `<root>/profiles/<name>`: run Beacon with `HERMES_HOME` set to that directory, or pass `--db <path>` to status/sync or `--store-dir hermes=<path>` to handoff.
 

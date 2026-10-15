@@ -276,10 +276,50 @@ func TestHermesHooksRefuseUnusableActiveProfile(t *testing.T) {
 			t.Fatalf("InstallHermes created %s: %v", path, err)
 		}
 	}
-	if _, err := UninstallHermes(opts); err == nil {
-		t.Fatal("UninstallHermes accepted an unusable active profile")
-	}
 	if status := HermesHookStatus(opts); status.Installed {
 		t.Fatalf("HermesHookStatus = %#v, want not installed", status)
+	}
+}
+
+// Hooks written before active_profile went bad live in the base directory's config.yaml. Hermes
+// will not start until the profile is fixed, but that is no reason to strand them: uninstall
+// removes them there, and status finds them there while still naming the profile problem.
+func TestHermesHooksUninstallFallsBackToBaseDirForUnusableProfile(t *testing.T) {
+	native := hermesTestHome(t)
+	opts := HermesOptions{Level: LevelUser, UserMode: true}
+	if _, err := InstallHermes(opts); err != nil {
+		t.Fatalf("InstallHermes: %v", err)
+	}
+	base := filepath.Join(native, "config.yaml")
+	if err := os.WriteFile(filepath.Join(native, "active_profile"), []byte("gone\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	status := HermesHookStatus(opts)
+	if !status.Installed || status.ConfigPath != base {
+		t.Fatalf("HermesHookStatus = %#v, want installed at %q", status, base)
+	}
+	if !strings.Contains(status.Message, "active profile") {
+		t.Fatalf("HermesHookStatus message %q does not name the profile problem", status.Message)
+	}
+	if !IsHermesInstalled(opts) {
+		t.Fatal("IsHermesInstalled = false with Beacon hooks in the base config.yaml")
+	}
+
+	removed, err := UninstallHermes(opts)
+	if err != nil {
+		t.Fatalf("UninstallHermes with an unusable active profile: %v", err)
+	}
+	if removed.ConfigPath != base || removed.Installed {
+		t.Fatalf("UninstallHermes = %#v, want removed from %q", removed, base)
+	}
+	if _, err := os.Stat(base); !os.IsNotExist(err) {
+		t.Fatalf("base config.yaml holding only Beacon hooks was not removed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(native, "profiles", "gone")); !os.IsNotExist(err) {
+		t.Fatalf("UninstallHermes created the missing profile: %v", err)
+	}
+	if _, err := InstallHermes(opts); err == nil || !strings.Contains(err.Error(), "active profile") {
+		t.Fatalf("InstallHermes err = %v, want the active profile named", err)
 	}
 }

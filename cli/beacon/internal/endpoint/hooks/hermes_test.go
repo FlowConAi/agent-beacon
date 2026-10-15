@@ -323,3 +323,109 @@ func TestHermesHooksUninstallFallsBackToBaseDirForUnusableProfile(t *testing.T) 
 		t.Fatalf("InstallHermes err = %v, want the active profile named", err)
 	}
 }
+
+// writeHermesTestConfig writes a config.yaml holding Beacon's hooks, as an earlier install left
+// them, plus one hook of the user's own when withUserHook is set.
+func writeHermesTestConfig(t *testing.T, path string, withUserHook bool) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if withUserHook {
+		user := "model: anthropic/claude-sonnet-4.6\nhooks:\n  pre_tool_call:\n    - matcher: terminal\n      command: ~/.hermes/agent-hooks/user-policy.sh\n"
+		if err := os.WriteFile(path, []byte(user), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := installHermesConfig(path, "/old/beacon-hooks", "/old/runtime.jsonl", "/old/config.json"); err != nil {
+		t.Fatal(err)
+	}
+	if !isHermesInstalledAt(path) {
+		t.Fatalf("fixture %s holds no Beacon hooks", path)
+	}
+}
+
+// Every Beacon before HERMES_HOME and profile support wrote ~/.hermes/config.yaml, and an install
+// made before `hermes profile use` wrote the base directory's. Hermes reads those again as soon as
+// HERMES_HOME is unset or the default profile is selected, so uninstall removes Beacon's entries
+// from them too, leaves everything else in them alone, and status names them while they remain.
+func TestHermesHooksUninstallRemovesHooksFromEarlierConfigPaths(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T, home, native string) (current, stale string)
+	}{
+		{"HERMES_HOME", func(t *testing.T, home, native string) (string, string) {
+			dir := filepath.Join(t.TempDir(), "hermes-data")
+			t.Setenv("HERMES_HOME", dir)
+			return filepath.Join(dir, "config.yaml"), filepath.Join(home, ".hermes", "config.yaml")
+		}},
+		{"active profile", func(t *testing.T, home, native string) (string, string) {
+			profile := filepath.Join(native, "profiles", "work")
+			if err := os.MkdirAll(profile, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(native, "active_profile"), []byte("work\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			return filepath.Join(profile, "config.yaml"), filepath.Join(native, "config.yaml")
+		}},
+	} {
+		for _, withUserHook := range []bool{false, true} {
+			name := tc.name
+			if withUserHook {
+				name += " with user hooks"
+			}
+			t.Run(name, func(t *testing.T) {
+				native := hermesTestHome(t)
+				home, err := os.UserHomeDir()
+				if err != nil {
+					t.Fatal(err)
+				}
+				current, stale := tc.setup(t, home, native)
+				writeHermesTestConfig(t, stale, withUserHook)
+				opts := HermesOptions{Level: LevelUser, UserMode: true}
+
+				status := HermesHookStatus(opts)
+				if status.Installed || status.ConfigPath != current {
+					t.Fatalf("HermesHookStatus = %#v, want not installed at %q", status, current)
+				}
+				if !strings.Contains(status.Message, stale) {
+					t.Fatalf("HermesHookStatus message %q does not name the leftover hooks in %s", status.Message, stale)
+				}
+				if len(status.StaleConfigPaths) != 1 || status.StaleConfigPaths[0] != stale {
+					t.Fatalf("HermesHookStatus StaleConfigPaths = %q, want [%q]", status.StaleConfigPaths, stale)
+				}
+
+				removed, err := UninstallHermes(opts)
+				if err != nil {
+					t.Fatalf("UninstallHermes: %v", err)
+				}
+				if removed.ConfigPath != current || removed.Installed {
+					t.Fatalf("UninstallHermes = %#v, want nothing left at %q", removed, current)
+				}
+				if !strings.Contains(removed.Message, "removed") || !strings.Contains(removed.Message, stale) {
+					t.Fatalf("UninstallHermes message %q does not report removing hooks from %s", removed.Message, stale)
+				}
+				if withUserHook {
+					data, err := os.ReadFile(stale)
+					if err != nil {
+						t.Fatalf("uninstall removed %s, which holds the user's own settings: %v", stale, err)
+					}
+					for _, want := range []string{"user-policy.sh", "model: anthropic/claude-sonnet-4.6"} {
+						if !strings.Contains(string(data), want) {
+							t.Fatalf("uninstall dropped %q from %s:\n%s", want, stale, data)
+						}
+					}
+					if isHermesInstalledAt(stale) {
+						t.Fatalf("Beacon hooks remain in %s:\n%s", stale, data)
+					}
+				} else if _, err := os.Stat(stale); !os.IsNotExist(err) {
+					t.Fatalf("%s holding only Beacon hooks was not removed: %v", stale, err)
+				}
+				if status := HermesHookStatus(opts); strings.Contains(status.Message, stale) || len(status.StaleConfigPaths) > 0 {
+					t.Fatalf("HermesHookStatus after uninstall still names %s: %q", stale, status.Message)
+				}
+			})
+		}
+	}
+}

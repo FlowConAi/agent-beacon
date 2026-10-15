@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 
@@ -22,6 +23,11 @@ type HermesStatus struct {
 	BinaryPath string `json:"binary_path,omitempty"`
 	ConfigPath string `json:"config_path,omitempty"`
 	Message    string `json:"message,omitempty"`
+	// StaleConfigPaths are config.yaml files other than ConfigPath that still hold Beacon hooks
+	// from an earlier install. Hermes does not read them now, but reads them again once
+	// HERMES_HOME or the active profile changes back, so status names them and uninstall removes
+	// Beacon's entries from them.
+	StaleConfigPaths []string `json:"stale_config_paths,omitempty"`
 }
 
 type hermesConfig struct {
@@ -68,7 +74,26 @@ func UninstallHermes(opts HermesOptions) (HermesStatus, error) {
 	if err != nil {
 		return HermesStatus{}, err
 	}
-	return hermesStatusFromRuntime(status), nil
+	out := hermesStatusFromRuntime(status)
+	var removed, failed []string
+	for _, path := range hermesEarlierConfigPaths(opts.Level, status.ConfigPath) {
+		updated, err := removeHermesEndpointHooks(path)
+		if err != nil {
+			// The file is not one this uninstall was asked about and may be the user's own,
+			// so a parse failure there is reported rather than failing the uninstall.
+			failed = append(failed, fmt.Sprintf("%s (%v)", path, err))
+		} else if updated {
+			removed = append(removed, path)
+		}
+	}
+	if len(removed) > 0 {
+		out.Message = fmt.Sprintf("%s; removed Beacon hooks left by an earlier install from %s", out.Message, strings.Join(removed, ", "))
+	}
+	if len(failed) > 0 {
+		out.Message = fmt.Sprintf("%s; could not check for Beacon hooks left by an earlier install in %s", out.Message, strings.Join(failed, ", "))
+		out.StaleConfigPaths = hermesStaleConfigPaths(opts.Level, status.ConfigPath)
+	}
+	return out, nil
 }
 
 // HermesHookStatus reports the hooks in the config.yaml Hermes reads, or in the base directory's when
@@ -78,7 +103,50 @@ func HermesHookStatus(opts HermesOptions) HermesStatus {
 	if _, err := hermesConfigPath(opts.Level); errors.Is(err, hermessession.ErrUnusableProfile) && status.ConfigPath != "" {
 		status.Message = fmt.Sprintf("%s; %v", status.Message, err)
 	}
+	if stale := hermesStaleConfigPaths(opts.Level, status.ConfigPath); len(stale) > 0 {
+		status.StaleConfigPaths = stale
+		status.Message = fmt.Sprintf("%s; Beacon hooks from an earlier install remain in %s, which Hermes does not read now; `beacon endpoint hooks uninstall --harness hermes` removes them", status.Message, strings.Join(stale, ", "))
+	}
 	return status
+}
+
+// hermesEarlierConfigPaths are the config.yaml files other than current that an earlier Beacon
+// install may have written: ~/.hermes/config.yaml, where every version before HERMES_HOME and
+// profile support wrote on every platform; the native root's, where an install made before
+// HERMES_HOME was set wrote; and the base directory's, where one made before `hermes profile use`
+// wrote. Hermes reads each of them again once HERMES_HOME or the active profile changes back.
+func hermesEarlierConfigPaths(level Level, current string) []string {
+	if current == "" || (level != "" && level != LevelUser) {
+		return nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return nil
+	}
+	seen := map[string]bool{filepath.Clean(current): true}
+	var paths []string
+	for _, dir := range []string{filepath.Join(home, ".hermes"), hermessession.NativeRoot(home), hermessession.BaseDir(home)} {
+		if dir == "" {
+			continue
+		}
+		path := filepath.Clean(filepath.Join(dir, "config.yaml"))
+		if !seen[path] {
+			seen[path] = true
+			paths = append(paths, path)
+		}
+	}
+	return paths
+}
+
+// hermesStaleConfigPaths are the hermesEarlierConfigPaths that still hold Beacon hooks.
+func hermesStaleConfigPaths(level Level, current string) []string {
+	var stale []string
+	for _, path := range hermesEarlierConfigPaths(level, current) {
+		if isHermesInstalledAt(path) {
+			stale = append(stale, path)
+		}
+	}
+	return stale
 }
 
 func IsHermesInstalled(opts HermesOptions) bool {

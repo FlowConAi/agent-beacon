@@ -83,6 +83,19 @@ func FallbackHomeDir(home string) (dir string, err error) {
 	return dir, nil
 }
 
+// BaseDir is the directory Hermes uses before profiles are applied: HERMES_HOME, or the native root.
+// It is empty when neither can be resolved.
+func BaseDir(home string) string {
+	base, _, _ := resolveHome(home)
+	return base
+}
+
+// NativeRoot is Hermes's platform default home: ~/.hermes plus HERMES_DATA_DIR_SUFFIX, or
+// %LOCALAPPDATA%\hermes plus the suffix on Windows. It is empty when there is no home to put it in.
+func NativeRoot(home string) string {
+	return nativeRoot(home)
+}
+
 // DefaultDBPath is the state.db in HomeDir. When the active profile cannot be used, Hermes writes
 // nothing new anywhere, so status, sync and handoff keep reading the base directory's store, which
 // holds whatever Hermes wrote there before.

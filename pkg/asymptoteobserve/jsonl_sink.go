@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+
+	"github.com/asymptote-labs/agent-beacon/pkg/asymptoteobserve/heedvane"
 )
 
 // ErrSinkPathRequired is returned when a JSONL sink has no output path.
@@ -37,10 +39,10 @@ func (s *JSONLSink) WriteBatch(ctx context.Context, events []Event) (err error) 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if err := os.MkdirAll(filepath.Dir(s.path), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(s.path), heedvane.UserLogDirPerm()); err != nil {
 		return err
 	}
-	f, err := os.OpenFile(s.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	f, err := os.OpenFile(s.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, heedvane.UserLogFilePerm())
 	if err != nil {
 		return err
 	}

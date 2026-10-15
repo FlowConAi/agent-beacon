@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/asymptote-labs/agent-beacon/cli/beacon/internal/auth"
+	"github.com/asymptote-labs/agent-beacon/pkg/asymptoteobserve/heedvane"
 )
 
 // Dashboard paths for device enrollment. The page and the two API routes are served by the
@@ -96,6 +97,14 @@ func Enroll(ctx context.Context, opts EnrollOptions) (*EnrollResult, error) {
 	if client == nil {
 		client = &http.Client{Timeout: 30 * time.Second}
 	}
+	if token := heedvane.EnrollTokenFromEnv(); token != "" {
+		return EnrollAccount(ctx, AccountEnrollOptions{
+			BaseURL:     dashboardURL,
+			AccessToken: token,
+			Device:      opts.Device,
+			HTTPClient:  client,
+		})
+	}
 	out := opts.Out
 	if out == nil {
 		out = io.Discard
@@ -130,7 +139,7 @@ func Enroll(ctx context.Context, opts EnrollOptions) (*EnrollResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	server.SetSuccessPage("This device is connected", "Return to your terminal. This machine now forwards new events to Beacon.")
+	server.SetSuccessPage("This device is connected", "Return to your terminal. This machine now forwards new events to "+heedvane.BrandName("Beacon")+".")
 	defer func() { _ = server.Shutdown() }()
 	server.Start()
 
@@ -171,7 +180,7 @@ func Enroll(ctx context.Context, opts EnrollOptions) (*EnrollResult, error) {
 
 func validateEnrollResult(r *EnrollResult) error {
 	switch {
-	case r.DeviceKey == "" || !strings.HasPrefix(r.DeviceKey, "bcn_device_"):
+	case !heedvane.IsValidDeviceKey(r.DeviceKey):
 		return errors.New("exchange response did not include a device key")
 	case r.DeviceID == "" || r.OrganizationID == "":
 		return errors.New("exchange response is missing the device or organization id")

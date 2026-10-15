@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/asymptote-labs/agent-beacon/cli/beacon/internal/auth"
+	"github.com/asymptote-labs/agent-beacon/pkg/asymptoteobserve/heedvane"
 )
 
 const (
@@ -296,15 +297,10 @@ func Revoke(ctx context.Context, session Session, client *http.Client) error {
 	return fmt.Errorf("revoke request returned HTTP %d", resp.StatusCode)
 }
 
+var _ = os.Getenv
+
 func ResolveBaseURL(flagValue string) string {
-	value := strings.TrimSpace(flagValue)
-	if value == "" {
-		value = strings.TrimSpace(os.Getenv(BaseURLEnv))
-	}
-	if value == "" {
-		value = DefaultBaseURL
-	}
-	return strings.TrimRight(value, "/")
+	return heedvane.ResolveAuthURL(flagValue, BaseURLEnv, DefaultBaseURL)
 }
 
 // printLoginURL shows the sign-in URL and how to use it from another computer.

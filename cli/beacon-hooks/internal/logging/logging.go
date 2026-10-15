@@ -19,6 +19,7 @@ import (
 	"github.com/asymptote-labs/agent-beacon/pkg/asymptoteobserve"
 	"github.com/asymptote-labs/agent-beacon/pkg/asymptoteobserve/activesession"
 	"github.com/asymptote-labs/agent-beacon/pkg/asymptoteobserve/filelock"
+	"github.com/asymptote-labs/agent-beacon/pkg/asymptoteobserve/heedvane"
 	"github.com/asymptote-labs/agent-beacon/pkg/asymptoteobserve/shareauto"
 )
 
@@ -89,7 +90,7 @@ func (l *Logger) write(entry map[string]interface{}) {
 		return
 	}
 
-	f, err := os.OpenFile(l.logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	f, err := os.OpenFile(l.logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, heedvane.UserLogFilePerm())
 	if err != nil {
 		return
 	}

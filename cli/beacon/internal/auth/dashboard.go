@@ -18,6 +18,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/asymptote-labs/agent-beacon/pkg/asymptoteobserve/heedvane"
 )
 
 const (
@@ -27,16 +29,12 @@ const (
 	AuthTimeout = 5 * time.Minute
 )
 
+var _ = os.Getenv
+
 // ResolveDashboardURL picks the dashboard base URL from a flag, the environment,
 // or the default, in that order, without a trailing slash.
 func ResolveDashboardURL(flagValue string) string {
-	if flagValue != "" {
-		return NormalizeDashboardURL(flagValue)
-	}
-	if envValue := os.Getenv(DashboardURLEnv); envValue != "" {
-		return NormalizeDashboardURL(envValue)
-	}
-	return DefaultDashboardURL
+	return heedvane.ResolveDashboardURL(flagValue, DashboardURLEnv, DefaultDashboardURL)
 }
 
 // NormalizeDashboardURL trims whitespace and trailing slashes, falling back to the

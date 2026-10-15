@@ -5,6 +5,8 @@ import (
 	"regexp"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/asymptote-labs/agent-beacon/pkg/asymptoteobserve/heedvane"
 )
 
 const (
@@ -256,7 +258,7 @@ func RedactString(value string) string {
 	for _, copied := range assigned {
 		value = strings.ReplaceAll(value, copied, redactedValue)
 	}
-	return value
+	return heedvane.RedactSecrets(value)
 }
 
 // isSecretKeyName reports whether a structured field's name says its value is a credential:

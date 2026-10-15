@@ -12,6 +12,7 @@ import (
 	"github.com/asymptote-labs/agent-beacon/cli/beacon-hooks/internal/logging"
 	"github.com/asymptote-labs/agent-beacon/cli/beacon-hooks/internal/state"
 	"github.com/asymptote-labs/agent-beacon/pkg/asymptoteobserve"
+	"github.com/asymptote-labs/agent-beacon/pkg/asymptoteobserve/heedvane"
 	"github.com/asymptote-labs/agent-beacon/pkg/asymptoteobserve/policycontract"
 )
 
@@ -178,6 +179,15 @@ func emitPreToolDecision(logger *logging.Logger, input map[string]interface{}, s
 // disarm the user's own confirmation prompts for every tool call. A provider deny from the policy
 // seam is not this function's business; policyDenyFor answers that in each runtime's deny shape.
 func preToolResponse() map[string]interface{} {
+	if heedvane.NoAutoAllowEnabled() {
+		if platformFlag == "antigravity" {
+			return nil
+		}
+		if platformFlag == goosePlatform {
+			return gooseBlockingEventResponse
+		}
+		return emptyResponse
+	}
 	// Antigravity gets no output at all. Its documented PreToolUse contract
 	// (https://antigravity.google/docs/hooks/) makes `decision` a required field, and its values
 	// are all opinions: "allow" "automatically allows the tool execution", which is exactly the

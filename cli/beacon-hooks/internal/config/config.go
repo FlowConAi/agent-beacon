@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/asymptote-labs/agent-beacon/pkg/asymptoteobserve/heedvane"
 )
 
 // Directories
@@ -142,7 +144,7 @@ func GetSessionLogFile(platform, sessionID string) string {
 
 // EnsureSessionLogDir creates the session logs directory if it doesn't exist
 func EnsureSessionLogDir(platform string) error {
-	return os.MkdirAll(GetSessionLogDir(platform), 0755)
+	return os.MkdirAll(GetSessionLogDir(platform), heedvane.UserLogDirPerm())
 }
 
 // RotateLogIfNeededForPlatform rotates the platform-specific log file if it exceeds LogMaxSizeBytes.
@@ -203,5 +205,5 @@ func removeOverflowArchives(path string, archives int) error {
 
 // EnsureStateDir ensures the state directory for the given platform exists
 func EnsureStateDir(platform string) error {
-	return os.MkdirAll(GetStateDir(platform), 0755)
+	return os.MkdirAll(GetStateDir(platform), heedvane.UserLogDirPerm())
 }

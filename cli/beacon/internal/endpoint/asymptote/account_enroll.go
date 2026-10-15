@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/asymptote-labs/agent-beacon/pkg/asymptoteobserve/heedvane"
 )
 
 const AccountEnrollPath = "/api/cli/enroll/account"
@@ -33,7 +35,7 @@ func EnrollAccount(ctx context.Context, opts AccountEnrollOptions) (*EnrollResul
 	if !IsSecureURL(baseURL) {
 		return nil, fmt.Errorf("account enrollment URL must use https://: %s", baseURL)
 	}
-	if !strings.HasPrefix(opts.AccessToken, "bcn_cli_") {
+	if !heedvane.IsValidAccessToken(opts.AccessToken) {
 		return nil, errors.New("account enrollment needs a Beacon CLI access token")
 	}
 	if opts.Device.InstallID == "" {

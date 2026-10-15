@@ -92,3 +92,44 @@ func TestEnrollAccountDoesNotForwardCredentialAcrossRedirect(t *testing.T) {
 		t.Fatalf("error=%v leaked authorization=%q", err, leaked)
 	}
 }
+
+func TestEnrollHeadlessWithHeedvaneTokenAndDeviceKey(t *testing.T) {
+	t.Setenv("HEEDVANE_ENROLL_TOKEN", "hdv_enroll_testtoken123456")
+	browserOpened := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != AccountEnrollPath {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"device_id":         "dev-hdv-1",
+			"device_key":        "hdv_device_abcdefgh_" + strings.Repeat("h", 43),
+			"key_prefix":        "hdv_device_abcdefgh",
+			"ingest_url":        "https://heedvane.ai",
+			"organization_id":   "org-hdv-1",
+			"organization_name": "Heedvane",
+			"email":             "andre@heedvane.ai",
+			"scopes":            []string{"ingest:write"},
+		})
+	}))
+	defer server.Close()
+
+	result, err := Enroll(context.Background(), EnrollOptions{
+		DashboardURL: server.URL,
+		Device:       device(),
+		HTTPClient:   server.Client(),
+		OpenBrowser: func(string) error {
+			browserOpened = true
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("Enroll with HEEDVANE_ENROLL_TOKEN returned error: %v", err)
+	}
+	if browserOpened {
+		t.Fatal("expected headless token enrollment to skip opening a browser")
+	}
+	if result.DeviceID != "dev-hdv-1" || !strings.HasPrefix(result.DeviceKey, "hdv_device_") {
+		t.Fatalf("unexpected headless EnrollResult: %#v", result)
+	}
+}

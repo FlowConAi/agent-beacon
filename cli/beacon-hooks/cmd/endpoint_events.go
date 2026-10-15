@@ -16,6 +16,7 @@ import (
 	"github.com/asymptote-labs/agent-beacon/cli/beacon-hooks/internal/git"
 	"github.com/asymptote-labs/agent-beacon/cli/beacon-hooks/internal/logging"
 	"github.com/asymptote-labs/agent-beacon/pkg/asymptoteobserve"
+	"github.com/asymptote-labs/agent-beacon/pkg/asymptoteobserve/heedvane"
 )
 
 func emitHookEvent(logger *logging.Logger, action, category, severity, message string, input map[string]interface{}, fields map[string]interface{}) {
@@ -159,6 +160,7 @@ func emitHookEventWithFidelity(logger *logging.Logger, action, category, severit
 	if err := logger.EndpointEventWithFidelity(action, category, severity, message, fidelity, fields); err != nil {
 		logger.Error("Failed to write endpoint event", "error", err.Error(), "action", action)
 	}
+	heedvane.ForwardHookEvent(action, platformFlag, input, fields)
 }
 
 // normalizedEvent is one endpoint event a mapper has decided to write, before it reaches the

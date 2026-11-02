@@ -137,6 +137,7 @@ func (l *Logger) EndpointEventWithFidelity(action, category, severity, message, 
 		}
 		event[key] = value
 	}
+	stampGitOrigin(event)
 	normalizeEventModel(event)
 	attachDerivedTrace(event)
 	if err := writeEndpointJSON(path, event); err != nil {
@@ -147,6 +148,15 @@ func (l *Logger) EndpointEventWithFidelity(action, category, severity, message, 
 	recordActiveSession(event)
 	l.requestShareOnce(event)
 	return nil
+}
+
+// stampGitOrigin names the repository of the event's working directory, resolved on this machine.
+func stampGitOrigin(event map[string]interface{}) {
+	session, _ := event["session"].(map[string]interface{})
+	dir, _ := session["working_directory"].(string)
+	if origin := heedvane.GitOrigin(dir); origin != "" {
+		event["git_origin"] = origin
+	}
 }
 
 // requestShareOnce writes one session.share_requested event for the event's session when the person
@@ -576,7 +586,7 @@ func minimalEndpointEvent(event map[string]interface{}) map[string]interface{} {
 		"endpoint", "user", "harness", "origin", "run", "session", "trace",
 		"error", "tool", "file", "command", "mcp", "approval", "policy",
 		"content", "destination", "health", "model", "repository",
-		"branch", "message",
+		"branch", "git_origin", "message",
 	} {
 		if value, ok := event[key]; ok && value != nil {
 			out[key] = value

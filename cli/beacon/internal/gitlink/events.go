@@ -3,11 +3,11 @@ package gitlink
 import (
 	"context"
 	"fmt"
-	"net/url"
 	"strings"
 
 	"github.com/asymptote-labs/agent-beacon/cli/beacon/internal/endpoint/schema"
 	"github.com/asymptote-labs/agent-beacon/pkg/asymptoteobserve"
+	"github.com/asymptote-labs/agent-beacon/pkg/asymptoteobserve/heedvane"
 )
 
 // LinkAction is the event action recorded in the runtime log when a commit is linked to a session.
@@ -46,41 +46,9 @@ func ResolveCommitContext(ctx context.Context, repo Repo, commit Commit) CommitC
 	return cc
 }
 
-// SanitizeRemoteURL removes credentials from a remote URL. An https remote can carry a token as
-// its user info (https://x-access-token:ghp_...@github.com/org/repo), and the URL is about to be
-// written to a log that may be forwarded. The user of an scp-style remote (git@host:org/repo) is a
-// login, not a secret, but it is dropped too so every spelling of a remote reads the same.
-func SanitizeRemoteURL(raw string) string {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return ""
-	}
-	if strings.Contains(raw, "://") {
-		u, err := url.Parse(raw)
-		if err != nil {
-			// Unparseable: drop anything that could be user info rather than risk keeping it.
-			if at := strings.LastIndex(raw, "@"); at >= 0 {
-				if scheme := strings.Index(raw, "://"); scheme >= 0 && scheme < at {
-					return raw[:scheme+3] + raw[at+1:]
-				}
-			}
-			return raw
-		}
-		u.User = nil
-		u.RawQuery = ""
-		u.Fragment = ""
-		return u.String()
-	}
-	// scp-like syntax: [user@]host:path. A local path has no colon before its first slash.
-	if at := strings.Index(raw, "@"); at >= 0 {
-		colon := strings.Index(raw, ":")
-		slash := strings.Index(raw, "/")
-		if colon > at && (slash < 0 || colon < slash) {
-			return raw[at+1:]
-		}
-	}
-	return raw
-}
+// SanitizeRemoteURL removes credentials from a remote URL; the one implementation lives in the
+// Heedvane adapter so the hook adapter and the session mappers share it.
+func SanitizeRemoteURL(raw string) string { return heedvane.SanitizeRemoteURL(raw) }
 
 // LinkEvents returns one runtime-log event per link result added, in the session's own timeline:
 // harness and session are the linked session's, so the dashboard, traces and handoff briefs show

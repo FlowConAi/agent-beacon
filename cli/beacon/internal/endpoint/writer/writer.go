@@ -15,6 +15,7 @@ import (
 	"github.com/asymptote-labs/agent-beacon/cli/beacon/internal/endpoint/schema"
 	"github.com/asymptote-labs/agent-beacon/pkg/asymptoteobserve"
 	"github.com/asymptote-labs/agent-beacon/pkg/asymptoteobserve/filelock"
+	"github.com/asymptote-labs/agent-beacon/pkg/asymptoteobserve/heedvane"
 )
 
 const (
@@ -73,6 +74,9 @@ func AppendEvent(event schema.Event, opts Options) (string, error) {
 		opts.RotateArchives = DefaultRotateArchives
 	}
 	asymptoteobserve.AttachDerivedTrace(&event)
+	if event.GitOrigin == "" && event.Session != nil {
+		event.GitOrigin = heedvane.GitOrigin(event.Session.WorkingDirectory)
+	}
 	event = SanitizeEvent(event, opts.MaxBytes)
 	if err := event.Validate(); err != nil {
 		return "", err

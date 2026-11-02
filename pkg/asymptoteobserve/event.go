@@ -670,6 +670,7 @@ type Event struct {
 	Model         string                 `json:"model,omitempty"`
 	Repository    string                 `json:"repository,omitempty"`
 	Branch        string                 `json:"branch,omitempty"`
+	GitOrigin     string                 `json:"git_origin,omitempty"` // sanitized origin remote, stamped by heedvane.GitOrigin
 	Message       string                 `json:"message,omitempty"`
 	Raw           map[string]interface{} `json:"raw,omitempty"`
 	Truncated     bool                   `json:"field_truncated,omitempty"`

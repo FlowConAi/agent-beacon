@@ -11,6 +11,7 @@ import (
 	"github.com/asymptote-labs/agent-beacon/collector-builder/exporter/beaconjsonexporter/internal/beaconevent"
 	"github.com/asymptote-labs/agent-beacon/pkg/asymptoteobserve"
 	"github.com/asymptote-labs/agent-beacon/pkg/asymptoteobserve/filelock"
+	"github.com/asymptote-labs/agent-beacon/pkg/asymptoteobserve/heedvane"
 )
 
 type jsonlWriter struct {
@@ -22,6 +23,9 @@ type jsonlWriter struct {
 }
 
 func (w jsonlWriter) append(event beaconEvent) error {
+	if event.GitOrigin == "" && event.Session != nil {
+		event.GitOrigin = heedvane.GitOrigin(event.Session.WorkingDirectory)
+	}
 	event = w.sanitize(event)
 	data, err := json.Marshal(event)
 	if err != nil {

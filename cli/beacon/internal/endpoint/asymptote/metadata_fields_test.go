@@ -91,7 +91,7 @@ var metadataOnlyKept = []string{
 	"gen_ai.token.type",
 	"gen_ai.tool.call.id", "gen_ai.tool.name", "gen_ai.tool.type",
 	"gen_ai.workflow.name",
-	"model", "repository", "branch",
+	"model", "repository", "branch", "git_origin",
 }
 
 // eventLeaf is one JSON field of the event schema. Text is true for the shapes that can carry

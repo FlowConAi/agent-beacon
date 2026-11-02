@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func gitIn(t *testing.T, dir string, args ...string) {
@@ -64,5 +65,75 @@ func TestGitOrigin(t *testing.T) {
 	t.Setenv("BEACON_DISABLE_GIT_METADATA", "1")
 	if got := GitOrigin(clone); got != "" {
 		t.Errorf("disabled: GitOrigin = %q, want empty", got)
+	}
+}
+
+func writeConfig(t *testing.T, content string) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".git", "config"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// Each case was compared with `git config --file <config> remote.origin.url`.
+func TestGitOriginReadsConfigAsGitDoes(t *testing.T) {
+	t.Setenv("BEACON_DISABLE_GIT_METADATA", "")
+	const want = "https://github.com/acme/widgets.git"
+	for name, config := range map[string]string{
+		"another remote in other case first": "[remote \"Origin\"]\n\turl = https://github.com/acme/other.git\n[remote \"origin\"]\n\turl = " + want + "\n",
+		"section name in other case":         "[REMOTE \"origin\"]\n\turl = " + want + "\n",
+		"comment after the header":           "[remote \"origin\"] # main remote\n\turl = " + want + "\n",
+		"comment after the value":            "[remote \"origin\"]\n\turl = " + want + " ; main remote\n",
+		"quoted value":                       "[remote \"origin\"]\n\turl = \"" + want + "\"\n",
+	} {
+		dir := writeConfig(t, config)
+		if out, err := exec.Command("git", "config", "--file", filepath.Join(dir, ".git", "config"), "remote.origin.url").Output(); err != nil || strings.TrimSpace(string(out)) != want {
+			t.Errorf("%s: git itself reads %q (%v)", name, out, err)
+		}
+		if got := GitOrigin(dir); got != want {
+			t.Errorf("%s: GitOrigin = %q, want %q", name, got, want)
+		}
+	}
+}
+
+func TestGitOriginNoticesAChangedOrigin(t *testing.T) {
+	t.Setenv("BEACON_DISABLE_GIT_METADATA", "")
+	dir := t.TempDir()
+	if got := GitOrigin(dir); got != "" {
+		t.Fatalf("no repository yet: GitOrigin = %q", got)
+	}
+	if err := os.Mkdir(filepath.Join(dir, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const want = "https://github.com/acme/widgets.git"
+	if err := os.WriteFile(filepath.Join(dir, ".git", "config"), []byte("[remote \"origin\"]\n\turl = "+want+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gitOriginCache.Store(resolved, cachedOrigin{origin: "", at: time.Now().Add(-gitOriginFreshFor - time.Second)})
+	if got := GitOrigin(dir); got != want {
+		t.Errorf("after the answer aged out: GitOrigin = %q, want %q", got, want)
+	}
+}
+
+func TestSanitizeRemoteURLKeepsNoCredentials(t *testing.T) {
+	for raw, want := range map[string]string{
+		"https://git.example/repo%ZZ?private_token=SECRET": "",
+		"https://user:SECRET@git.example/repo%ZZ?t=SECRET": "",
+		"https://user:SECRET@github.com/acme/widgets.git":  "https://github.com/acme/widgets.git",
+		"https://github.com/acme/widgets.git?t=SECRET":     "https://github.com/acme/widgets.git",
+		"git@github.com:acme/widgets.git?t=SECRET":         "github.com:acme/widgets.git",
+	} {
+		if got := SanitizeRemoteURL(raw); got != want {
+			t.Errorf("SanitizeRemoteURL(%q) = %q, want %q", raw, got, want)
+		}
 	}
 }

@@ -9,13 +9,24 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 )
 
 // maxGitConfigBytes caps the read of a repository's config so a corrupt or hostile file cannot
 // balloon a hook or a collector pass.
 const maxGitConfigBytes = 1 << 20
 
-var gitOriginCache sync.Map // physical directory -> sanitized origin URL ("" when none)
+// gitOriginFreshFor bounds how long a collector or watcher keeps an answer, so a folder that gains or
+// changes its origin is named correctly without a restart. Long enough that a busy pass reads the
+// config once, not once per event.
+const gitOriginFreshFor = time.Minute
+
+type cachedOrigin struct {
+	origin string
+	at     time.Time
+}
+
+var gitOriginCache sync.Map // physical directory -> cachedOrigin ("" when none)
 
 // GitOrigin names the repository a working directory belongs to: the sanitized URL of its "origin"
 // remote, or "" when the folder is no repository, has no origin, or git metadata is disabled
@@ -24,7 +35,7 @@ var gitOriginCache sync.Map // physical directory -> sanitized origin URL ("" wh
 //
 // It reads local files only: it walks up from cwd to the nearest ".git", follows a linked worktree's
 // pointer file to the common git dir, and reads the config there. It never runs git or touches the
-// network. Results are cached per directory for the life of the process.
+// network. Results are cached per directory for gitOriginFreshFor.
 //
 // shortcut: reads only [remote "origin"] in the repository's own config; include files and
 // url.<base>.insteadOf rewrites are ignored, upgrade if a customer's origin hides behind either.
@@ -36,11 +47,11 @@ func GitOrigin(cwd string) string {
 	if resolved, err := filepath.EvalSymlinks(cwd); err == nil {
 		dir = resolved
 	}
-	if cached, ok := gitOriginCache.Load(dir); ok {
-		return cached.(string)
+	if cached, ok := gitOriginCache.Load(dir); ok && time.Since(cached.(cachedOrigin).at) < gitOriginFreshFor {
+		return cached.(cachedOrigin).origin
 	}
 	origin := SanitizeRemoteURL(readOriginURL(commonGitDir(dir)))
-	gitOriginCache.Store(dir, origin)
+	gitOriginCache.Store(dir, cachedOrigin{origin: origin, at: time.Now()})
 	return origin
 }
 
@@ -110,17 +121,46 @@ func readOriginURL(gitDir string) string {
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if strings.HasPrefix(line, "[") {
-			inOrigin = strings.EqualFold(strings.Join(strings.Fields(strings.Trim(line, "[]")), " "), `remote "origin"`)
+			inOrigin = opensOriginSection(line)
 			continue
 		}
 		if !inOrigin {
 			continue
 		}
 		if key, value, ok := strings.Cut(line, "="); ok && strings.EqualFold(strings.TrimSpace(key), "url") {
-			return strings.Trim(strings.TrimSpace(value), `"`)
+			return configValue(value)
 		}
 	}
 	return ""
+}
+
+// opensOriginSection reads a section header as Git does: the section name in any case, the subsection
+// exactly, and a comment may follow the closing bracket.
+func opensOriginSection(line string) bool {
+	section, rest, quoted := strings.Cut(strings.TrimPrefix(line, "["), `"`)
+	subsection, _, closed := strings.Cut(rest, `"`)
+	return quoted && closed && strings.EqualFold(strings.TrimSpace(section), "remote") && subsection == "origin"
+}
+
+// configValue reads a value as Git does: a comment starts at an unquoted ";" or "#", and quotes are
+// dropped.
+//
+// shortcut: backslash escapes and values continued on the next line are not read, upgrade if a remote
+// URL ever needs them.
+func configValue(raw string) string {
+	var value strings.Builder
+	quoted := false
+	for _, char := range raw {
+		switch {
+		case char == '"':
+			quoted = !quoted
+		case !quoted && (char == ';' || char == '#'):
+			return strings.TrimSpace(value.String())
+		default:
+			value.WriteRune(char)
+		}
+	}
+	return strings.TrimSpace(value.String())
 }
 
 func readCapped(path string, limit int64) string {
@@ -153,19 +193,15 @@ func SanitizeRemoteURL(raw string) string {
 	if strings.Contains(raw, "://") {
 		u, err := url.Parse(raw)
 		if err != nil {
-			// Unparseable: drop anything that could be user info rather than risk keeping it.
-			if at := strings.LastIndex(raw, "@"); at >= 0 {
-				if scheme := strings.Index(raw, "://"); scheme >= 0 && scheme < at {
-					return raw[:scheme+3] + raw[at+1:]
-				}
-			}
-			return raw
+			// Unparseable, so its credentials cannot be told apart: name no remote rather than risk keeping one.
+			return ""
 		}
 		u.User = nil
 		u.RawQuery = ""
 		u.Fragment = ""
 		return u.String()
 	}
+	raw, _, _ = strings.Cut(raw, "?")
 	// scp-like syntax: [user@]host:path. A local path has no colon before its first slash.
 	if at := strings.Index(raw, "@"); at >= 0 {
 		colon := strings.Index(raw, ":")

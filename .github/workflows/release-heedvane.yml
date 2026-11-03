@@ -1,0 +1,127 @@
+name: Release Heedvane Beacon
+
+# One release of the Beacon binary that `npx heedvane` downloads: five builds (macOS arm64 and x64,
+# Linux arm64 and x64, Windows x64), their checksums and the manifest the installer reads.
+#
+# Answers only to `heedvane-v*` tags, which the upstream release workflow (`v*` tags, signing secrets,
+# Homebrew) never matches, or to a run started by hand with a version. It signs and notarizes nothing:
+# the Go linker signs the arm64 builds ad hoc, which is all the kernel asks of a command line program
+# the installer downloads itself.
+#
+# Three things are checked before anything is built. The commit must be on main's history, so a tag or a
+# run started from a branch cannot release a commit nobody merged. The version must be a plain version
+# number; it reaches the shell only through environment variables, never as text in a script, so a
+# version that is really a command is refused instead of run. And the release tag, when it already
+# exists, must name this very commit: the binaries are built from the checked-out commit, the release's
+# source archives come from its tag, and `gh release create --target` never moves an existing tag. The
+# tag is created only at the end, at this commit, and read back before the release is published.
+
+on:
+  push:
+    tags:
+      - "heedvane-v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version without the prefix, for example 0.1.0 (released as the tag heedvane-v0.1.0)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: The commit is on main
+        env:
+          RELEASE_BRANCH: main
+        run: |
+          set -euo pipefail
+          if ! git rev-parse --verify --quiet "refs/remotes/origin/$RELEASE_BRANCH" > /dev/null; then
+            echo "::error::The branch $RELEASE_BRANCH is not in this checkout, so the commit cannot be shown to be on it."
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" "refs/remotes/origin/$RELEASE_BRANCH"; then
+            echo "::error::Commit $GITHUB_SHA is not on the history of $RELEASE_BRANCH. Merge it first, then release from $RELEASE_BRANCH."
+            exit 1
+          fi
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: cli/beacon/go.mod
+
+      - name: Version
+        id: version
+        env:
+          VERSION_INPUT: ${{ github.event.inputs.version || github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="${VERSION_INPUT#heedvane-v}"
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.]*)?$ ]]; then
+            echo "::error::The version must look like 0.1.0 or 0.1.0-rc.1, with optional heedvane-v in front."
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=heedvane-v$version" >> "$GITHUB_OUTPUT"
+
+      - name: The release tag, if it exists, is at this commit
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if tagged="$(git rev-parse --verify --quiet "refs/tags/$TAG^{commit}")" && [ "$tagged" != "$GITHUB_SHA" ]; then
+            echo "::error::The tag $TAG already points at $tagged, not at this commit $GITHUB_SHA. Use a new version, or release from the commit the tag names."
+            exit 1
+          fi
+
+      - name: Tests of the Heedvane adapter
+        run: |
+          cd cli/beacon
+          go vet ./cmd ./internal/pisession ./internal/endpoint/writer
+          go test ./cmd ./internal/pisession ./internal/endpoint/writer -run 'Heedvane|Sink|Iso|FloatValue' -count=1
+          cd ../../pkg/asymptoteobserve
+          go test ./heedvane -count=1
+
+      - name: Build the five binaries, checksums and manifest
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: packaging/heedvane/build-release.sh "$VERSION" dist
+
+      - name: The Linux build runs, and answers the command the helper uses
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          binary="dist/beacon_${VERSION}_linux_amd64"
+          gunzip -k "$binary.gz"
+          chmod +x "$binary"
+          "$binary" version | tee version.txt
+          grep -F "$VERSION" version.txt
+          mkdir -p "$RUNNER_TEMP/state"
+          HOME="$RUNNER_TEMP/home" "$binary" heedvane sync --state-dir "$RUNNER_TEMP/state" --skip claude,codex > "$RUNNER_TEMP/events.jsonl"
+          test ! -s "$RUNNER_TEMP/events.jsonl"
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if ! gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" -f "ref=refs/tags/$TAG" -f "sha=$GITHUB_SHA" > /dev/null; then
+            echo "The tag $TAG was not created here, so it must exist already; its commit is checked next."
+          fi
+          tagged="$(gh api "repos/$GITHUB_REPOSITORY/commits/refs/tags/$TAG" --jq .sha)"
+          if [ "$tagged" != "$GITHUB_SHA" ]; then
+            echo "::error::The tag $TAG points at $tagged, not at this commit $GITHUB_SHA, so nothing is published."
+            exit 1
+          fi
+          gh release create "$TAG" dist/beacon_*.gz dist/checksums.txt dist/heedvane-beacon.json \
+            --repo "$GITHUB_REPOSITORY" --verify-tag --title "Heedvane Beacon $VERSION" \
+            --notes "The Beacon build that npx heedvane installs. checksums.txt lists the sha256 of every file; heedvane-beacon.json is the manifest the installer reads."

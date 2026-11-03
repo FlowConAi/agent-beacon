@@ -111,7 +111,7 @@ func TestMapSessionClassifiesFileTool(t *testing.T) {
 		},
 	}
 
-	mapped, _ := MapSession(session, messages, &Cursor{Started: true})
+	mapped, _ := MapSession(session, messages, &Cursor{Started: true}, nil)
 	fileEvent := findMappedAction(t, mapped, "file.read")
 	if fileEvent.File == nil || fileEvent.File.Path != "README.md" || fileEvent.File.Operation != "read" {
 		t.Fatalf("file event = %#v, want README.md read", fileEvent.File)
@@ -343,6 +343,17 @@ UPDATE sessions SET ended_at = NULL, end_reason = NULL WHERE id = 'hermes-sessio
 		db.Close()
 		t.Fatalf("cursor = %#v, want the unresolved call carried on the cursor", cursor)
 	}
+	// The state file holds what resumes reading, never what the session ran: the call's arguments stay in
+	// Hermes's own store and are read from there on the next sweep.
+	rawState, err := os.ReadFile(statePath)
+	if err != nil {
+		db.Close()
+		t.Fatalf("read state file: %v", err)
+	}
+	if strings.Contains(string(rawState), "go test") || strings.Contains(string(rawState), "arguments") {
+		db.Close()
+		t.Fatalf("state file holds the call's arguments: %s", rawState)
+	}
 
 	if _, err := db.Exec(`
 INSERT INTO messages (id, session_id, role, tool_call_id, tool_name, content, timestamp, active)
@@ -368,6 +379,185 @@ UPDATE sessions SET ended_at = 1780632999.25, end_reason = 'cli_close' WHERE id 
 	if cursor := state.Sessions["hermes-session-1"]; cursor == nil || len(cursor.PendingCalls) != 0 {
 		t.Fatalf("cursor = %#v, want the resolved call dropped from the cursor", cursor)
 	}
+}
+
+// What the upstream collector saved after a sweep that saw the terminal call without its result: the call kept
+// whole, arguments included, under pending_calls. Captured by running that collector on the fixture below.
+const upstreamStateWithWaitingCall = `{
+  "version": 1,
+  "sessions": {
+    "hermes-session-1": {
+      "last_message_id": 2,
+      "started": true,
+      "input_tokens": 100,
+      "output_tokens": 20,
+      "cache_read_tokens": 7,
+      "cache_write_tokens": 3,
+      "reasoning_tokens": 5,
+      "cost_usd": 0.01,
+      "pending_calls": {
+        "call_terminal": {
+          "id": "call_terminal",
+          "name": "terminal",
+          "arguments": {
+            "command": "go test ./...",
+            "workdir": "/repo"
+          }
+        }
+      }
+    }
+  }
+}`
+
+func execHermes(t *testing.T, dbPath, statements string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(statements); err != nil {
+		t.Fatalf("exec %q: %v", statements, err)
+	}
+}
+
+const removeTerminalResult = `DELETE FROM messages WHERE id = 3;
+UPDATE sessions SET ended_at = NULL, end_reason = NULL WHERE id = 'hermes-session-1';`
+
+const addTerminalResult = `INSERT INTO messages (id, session_id, role, tool_call_id, tool_name, content, timestamp, active)
+VALUES (3, 'hermes-session-1', 'tool', 'call_terminal', 'terminal', '{"output":"ok","exit_code":0,"error":null}', 1780632833.0, 1);
+UPDATE sessions SET ended_at = 1780632999.25, end_reason = 'cli_close' WHERE id = 'hermes-session-1';`
+
+func requireCommandRan(t *testing.T, logPath string) {
+	t.Helper()
+	command := findAction(t, readEvents(t, logPath), "command.executed")
+	if command.Command == nil || command.Command.Command != "go test ./..." {
+		t.Fatalf("command event = %#v, want the command of the tool call", command.Command)
+	}
+}
+
+func requireStateHoldsNoArguments(t *testing.T, statePath string) string {
+	t.Helper()
+	raw, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatalf("read state file: %v", err)
+	}
+	for _, leaked := range []string{"go test", "workdir", "arguments", "pending_calls"} {
+		if strings.Contains(string(raw), leaked) {
+			t.Fatalf("state file still holds %q: %s", leaked, raw)
+		}
+	}
+	return string(raw)
+}
+
+// A machine that ran the upstream collector holds a version 1 state with the waiting call kept whole. When the
+// result is already in Hermes at the first sweep after the upgrade, the command must survive and the saved state
+// must hold no arguments.
+func TestCollectOnceKeepsTheCommandOfAnUpstreamCursorWhoseResultArrived(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "state.db")
+	createHermesFixtureDB(t, dbPath)
+	logPath := filepath.Join(dir, "runtime.jsonl")
+	statePath := filepath.Join(dir, "hermes-state.json")
+	if err := os.WriteFile(statePath, []byte(upstreamStateWithWaitingCall), 0o600); err != nil {
+		t.Fatalf("write upstream state: %v", err)
+	}
+
+	if _, err := CollectOnce(CollectOptions{DBPath: dbPath, StatePath: statePath, LogPath: logPath, Write: true, UserMode: true}); err != nil {
+		t.Fatalf("CollectOnce returned error: %v", err)
+	}
+
+	requireCommandRan(t, logPath)
+	requireStateHoldsNoArguments(t, statePath)
+}
+
+// The same upstream state when the result is still missing: the call is kept as a message id, the file loses its
+// arguments at once, and the result that comes later is still classified with the command.
+func TestCollectOnceUpgradesAnUpstreamCursorWhoseResultIsStillMissing(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "state.db")
+	createHermesFixtureDB(t, dbPath)
+	execHermes(t, dbPath, removeTerminalResult)
+	logPath := filepath.Join(dir, "runtime.jsonl")
+	statePath := filepath.Join(dir, "hermes-state.json")
+	if err := os.WriteFile(statePath, []byte(upstreamStateWithWaitingCall), 0o600); err != nil {
+		t.Fatalf("write upstream state: %v", err)
+	}
+	opts := CollectOptions{DBPath: dbPath, StatePath: statePath, LogPath: logPath, Write: true, UserMode: true}
+
+	if _, err := CollectOnce(opts); err != nil {
+		t.Fatalf("first CollectOnce returned error: %v", err)
+	}
+	saved := requireStateHoldsNoArguments(t, statePath)
+	if !strings.Contains(saved, `"call_terminal": 2`) {
+		t.Fatalf("state = %s, want the waiting call kept as the id of message 2", saved)
+	}
+
+	execHermes(t, dbPath, addTerminalResult)
+	if _, err := CollectOnce(opts); err != nil {
+		t.Fatalf("second CollectOnce returned error: %v", err)
+	}
+	requireCommandRan(t, logPath)
+}
+
+// When Hermes cannot answer the lookup that upgrades an upstream cursor (here: the column it reads is missing, a
+// real SQL error after the sessions were listed), the sweep fails, and the state it still saves must hold no
+// arguments, for the session that failed and for one it never reached. The next sweep finds the call and the
+// result is classified with its command.
+func TestCollectOnceWritesNoArgumentsWhenTheUpstreamUpgradeFails(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "state.db")
+	createHermesFixtureDB(t, dbPath)
+	logPath := filepath.Join(dir, "runtime.jsonl")
+	statePath := filepath.Join(dir, "hermes-state.json")
+	secondSession := `"hermes-session-2": {"last_message_id": 9, "pending_calls": {"call_other": {"id": "call_other", "name": "terminal", "arguments": {"command": "echo second-session-secret"}}}},`
+	state := strings.Replace(upstreamStateWithWaitingCall, `"sessions": {`, `"sessions": {`+secondSession, 1)
+	if err := os.WriteFile(statePath, []byte(state), 0o600); err != nil {
+		t.Fatalf("write upstream state: %v", err)
+	}
+	opts := CollectOptions{DBPath: dbPath, StatePath: statePath, LogPath: logPath, Write: true, UserMode: true}
+
+	execHermes(t, dbPath, `ALTER TABLE messages RENAME COLUMN tool_calls TO tool_calls_away;`)
+	if _, err := CollectOnce(opts); err == nil {
+		t.Fatal("CollectOnce succeeded although the lookup of the waiting call failed")
+	}
+	saved := requireStateHoldsNoArguments(t, statePath)
+	if strings.Contains(saved, "second-session-secret") {
+		t.Fatalf("state file holds the other session's arguments: %s", saved)
+	}
+	if !strings.Contains(saved, "call_terminal") {
+		t.Fatalf("state = %s, want the waiting call kept by its id so the next sweep can retry", saved)
+	}
+
+	execHermes(t, dbPath, `ALTER TABLE messages RENAME COLUMN tool_calls_away TO tool_calls;`)
+	if _, err := CollectOnce(opts); err != nil {
+		t.Fatalf("CollectOnce after Hermes answers again returned error: %v", err)
+	}
+	requireCommandRan(t, logPath)
+	requireStateHoldsNoArguments(t, statePath)
+}
+
+// Hermes compaction keeps a compacted row with active = 0. A call whose message was compacted between two sweeps
+// still has its arguments there, and its result must be classified with them.
+func TestCollectOnceReadsAWaitingCallThatHermesArchivedBetweenSweeps(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "state.db")
+	createHermesFixtureDB(t, dbPath)
+	execHermes(t, dbPath, removeTerminalResult)
+	logPath := filepath.Join(dir, "runtime.jsonl")
+	statePath := filepath.Join(dir, "hermes-state.json")
+	opts := CollectOptions{DBPath: dbPath, StatePath: statePath, LogPath: logPath, Write: true, UserMode: true}
+
+	if _, err := CollectOnce(opts); err != nil {
+		t.Fatalf("first CollectOnce returned error: %v", err)
+	}
+	execHermes(t, dbPath, `UPDATE messages SET active = 0 WHERE id = 2;`)
+	execHermes(t, dbPath, addTerminalResult)
+	if _, err := CollectOnce(opts); err != nil {
+		t.Fatalf("second CollectOnce returned error: %v", err)
+	}
+
+	requireCommandRan(t, logPath)
 }
 
 type writerFailingAfter struct {

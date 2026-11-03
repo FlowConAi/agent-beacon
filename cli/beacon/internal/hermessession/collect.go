@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -33,16 +34,44 @@ const (
 )
 
 type Cursor struct {
-	LastMessageID    int64                      `json:"last_message_id"`
-	Started          bool                       `json:"started"`
-	EndedAtMS        int64                      `json:"ended_at_ms,omitempty"`
-	InputTokens      int64                      `json:"input_tokens,omitempty"`
-	OutputTokens     int64                      `json:"output_tokens,omitempty"`
-	CacheReadTokens  int64                      `json:"cache_read_tokens,omitempty"`
-	CacheWriteTokens int64                      `json:"cache_write_tokens,omitempty"`
-	ReasoningTokens  int64                      `json:"reasoning_tokens,omitempty"`
-	CostUSD          float64                    `json:"cost_usd,omitempty"`
-	PendingCalls     map[string]json.RawMessage `json:"pending_calls,omitempty"`
+	LastMessageID    int64   `json:"last_message_id"`
+	Started          bool    `json:"started"`
+	EndedAtMS        int64   `json:"ended_at_ms,omitempty"`
+	InputTokens      int64   `json:"input_tokens,omitempty"`
+	OutputTokens     int64   `json:"output_tokens,omitempty"`
+	CacheReadTokens  int64   `json:"cache_read_tokens,omitempty"`
+	CacheWriteTokens int64   `json:"cache_write_tokens,omitempty"`
+	ReasoningTokens  int64   `json:"reasoning_tokens,omitempty"`
+	CostUSD          float64 `json:"cost_usd,omitempty"`
+	// PendingCalls are the tool calls still waiting for a result, each with the id of the message that holds
+	// its arguments. Only the id is kept: the arguments, which hold what a session wrote and ran, stay in
+	// Hermes's own store and are read from there again, so this file carries what resumes reading and nothing of
+	// what the session did.
+	PendingCalls map[string]int64 `json:"pending_call_messages,omitempty"`
+	// UnresolvedCalls are calls an earlier version saved whole under `pending_calls`, whose message in Hermes has
+	// not been found yet. Only their ids are kept, as migration metadata: UnmarshalJSON drops the arguments while
+	// reading, so nothing can write them back, and upgradeLegacyPending retries the ones that failed.
+	UnresolvedCalls []string `json:"pending_call_ids,omitempty"`
+}
+
+// UnmarshalJSON reads a cursor and, from the old `pending_calls` field, takes only the call ids. The arguments
+// that field holds are decoded away here, at the one place a state is read, so no later failure can serialize them.
+func (c *Cursor) UnmarshalJSON(data []byte) error {
+	type plain Cursor
+	stored := struct {
+		*plain
+		Legacy map[string]json.RawMessage `json:"pending_calls"`
+	}{plain: (*plain)(c)}
+	if err := json.Unmarshal(data, &stored); err != nil {
+		return err
+	}
+	for id := range stored.Legacy {
+		if !slices.Contains(c.UnresolvedCalls, id) {
+			c.UnresolvedCalls = append(c.UnresolvedCalls, id)
+		}
+	}
+	slices.Sort(c.UnresolvedCalls)
+	return nil
 }
 
 type State struct {
@@ -260,6 +289,9 @@ func CollectOnce(opts CollectOptions) (summary Summary, err error) {
 			err = fmt.Errorf("save Hermes collector state: %w", saveErr)
 		}
 	}()
+	if err := upgradeLegacyPending(store, state); err != nil {
+		return summary, err
+	}
 	var errs []error
 	for _, session := range sessions {
 		changed, collectErr := collectSession(store, session, state, opts, &summary)
@@ -287,13 +319,42 @@ func CollectOnce(opts CollectOptions) (summary Summary, err error) {
 	return summary, nil
 }
 
+// upgradeLegacyPending turns the waiting calls an earlier version saved with their full arguments into the
+// message ids this one keeps, by finding the message in Hermes that holds each call. It runs before any newer
+// result is read, so a result that arrives after an upgrade is still classified with the command it ran. A call
+// whose message Hermes no longer has is dropped. When a lookup fails, the ids not yet resolved stay in the cursor
+// (ids only, never arguments) and the sweep ends, so the next one retries and the saved file holds no arguments.
+func upgradeLegacyPending(store *Store, state *State) error {
+	for sessionID, cursor := range state.Sessions {
+		for i, callID := range cursor.UnresolvedCalls {
+			messageID, found, err := store.MessageHoldingCall(sessionID, callID, cursor.LastMessageID)
+			if err != nil {
+				cursor.UnresolvedCalls = cursor.UnresolvedCalls[i:]
+				return fmt.Errorf("find the message of waiting call %s in Hermes session %s: %w", callID, sessionID, err)
+			}
+			if found {
+				if cursor.PendingCalls == nil {
+					cursor.PendingCalls = map[string]int64{}
+				}
+				cursor.PendingCalls[callID] = messageID
+			}
+		}
+		cursor.UnresolvedCalls = nil
+	}
+	return nil
+}
+
 func collectSession(store *Store, session Session, state *State, opts CollectOptions, summary *Summary) (bool, error) {
 	cursor := state.cursor(session.ID)
 	messages, err := store.ReadMessages(session.ID, cursor.LastMessageID)
 	if err != nil {
 		return false, err
 	}
-	mapped, pending := MapSession(session, messages, cursor)
+	held, err := store.ReadMessagesByID(session.ID, pendingMessageIDs(cursor))
+	if err != nil {
+		return false, err
+	}
+	mapped, pending := MapSession(session, messages, cursor, held)
 	if len(mapped) == 0 {
 		cursor.PendingCalls = pending
 		advanceCursorMessages(cursor, messages)
@@ -447,16 +508,67 @@ ORDER BY started_at, id`)
 }
 
 func (s *Store) ReadMessages(sessionID string, afterID int64) ([]Message, error) {
-	rows, err := s.db.Query(`
-SELECT id, session_id, role, content, tool_call_id, tool_calls, tool_name, timestamp,
-       token_count, finish_reason, reasoning, reasoning_content, reasoning_details,
-       platform_message_id, observed, active
-FROM messages
+	rows, err := s.db.Query(messagesQuery+`
 WHERE session_id = ? AND active = 1 AND id > ?
 ORDER BY id`, sessionID, afterID)
 	if err != nil {
 		return nil, err
 	}
+	return scanMessages(rows)
+}
+
+// ReadMessagesByID reads the messages with these ids, which hold the arguments of the tool calls that are
+// still waiting for a result. It reads them whether or not they are active: Hermes keeps a compacted row with
+// active = 0, and a call compacted since the last sweep still has to be classified with the command it ran.
+func (s *Store) ReadMessagesByID(sessionID string, ids []int64) ([]Message, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	marks := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
+	args := make([]interface{}, 0, len(ids)+1)
+	args = append(args, sessionID)
+	for _, id := range ids {
+		args = append(args, id)
+	}
+	rows, err := s.db.Query(messagesQuery+`
+WHERE session_id = ? AND id IN (`+marks+`)
+ORDER BY id`, args...)
+	if err != nil {
+		return nil, err
+	}
+	return scanMessages(rows)
+}
+
+// MessageHoldingCall finds the id of the latest message up to upToID whose tool calls include callID, active or
+// not, so a cursor saved with a call's full arguments can be turned into the id of the message that holds them.
+func (s *Store) MessageHoldingCall(sessionID, callID string, upToID int64) (int64, bool, error) {
+	rows, err := s.db.Query(messagesQuery+`
+WHERE session_id = ? AND id <= ? AND instr(tool_calls, ?) > 0
+ORDER BY id DESC`, sessionID, upToID, callID)
+	if err != nil {
+		return 0, false, err
+	}
+	messages, err := scanMessages(rows)
+	if err != nil {
+		return 0, false, err
+	}
+	for _, message := range messages {
+		for _, call := range parseToolCalls(message.ToolCalls) {
+			if call.ID == callID {
+				return message.ID, true, nil
+			}
+		}
+	}
+	return 0, false, nil
+}
+
+const messagesQuery = `
+SELECT id, session_id, role, content, tool_call_id, tool_calls, tool_name, timestamp,
+       token_count, finish_reason, reasoning, reasoning_content, reasoning_details,
+       platform_message_id, observed, active
+FROM messages`
+
+func scanMessages(rows *sql.Rows) ([]Message, error) {
 	defer rows.Close()
 	var out []Message
 	for rows.Next() {
@@ -601,13 +713,16 @@ func openSQLiteReadOnly(path string) (*sql.DB, error) {
 // The pending calls are returned rather than written onto the cursor so the caller can persist them
 // only once every event in the batch is written. Recording them earlier would drop a call's
 // arguments when a later emit fails and the sweep retries the same messages.
-func MapSession(session Session, messages []Message, cursor *Cursor) ([]MappedEvent, map[string]json.RawMessage) {
-	m := &mapper{session: session, cursor: cursor, calls: map[string]toolCall{}}
+func MapSession(session Session, messages []Message, cursor *Cursor, held []Message) ([]MappedEvent, map[string]int64) {
+	m := &mapper{session: session, cursor: cursor, calls: map[string]toolCall{}, callMessage: map[string]int64{}}
 	if cursor != nil {
-		for id, raw := range cursor.PendingCalls {
-			var call toolCall
-			if json.Unmarshal(raw, &call) == nil && call.ID != "" {
-				m.calls[id] = call
+		// The calls still waiting come back from the messages that hold them, in Hermes's own store.
+		for _, message := range held {
+			for _, call := range parseToolCalls(message.ToolCalls) {
+				if _, waiting := cursor.PendingCalls[call.ID]; waiting {
+					m.calls[call.ID] = call
+					m.callMessage[call.ID] = message.ID
+				}
 			}
 		}
 	}
@@ -617,20 +732,19 @@ func MapSession(session Session, messages []Message, cursor *Cursor) ([]MappedEv
 	}
 	m.mapUsage()
 	m.mapSessionEnd()
-	return m.out, encodePendingCalls(m.calls)
+	return m.out, pendingMessages(m)
 }
 
-func encodePendingCalls(calls map[string]toolCall) map[string]json.RawMessage {
-	if len(calls) == 0 {
+// pendingMessages is which message holds each call that is still waiting for its result.
+func pendingMessages(m *mapper) map[string]int64 {
+	if len(m.calls) == 0 {
 		return nil
 	}
-	out := make(map[string]json.RawMessage, len(calls))
-	for id, call := range calls {
-		data, err := json.Marshal(call)
-		if err != nil {
-			continue
+	out := make(map[string]int64, len(m.calls))
+	for id := range m.calls {
+		if messageID, ok := m.callMessage[id]; ok {
+			out[id] = messageID
 		}
-		out[id] = data
 	}
 	if len(out) == 0 {
 		return nil
@@ -638,11 +752,25 @@ func encodePendingCalls(calls map[string]toolCall) map[string]json.RawMessage {
 	return out
 }
 
+// pendingMessageIDs are the distinct ids of the messages that hold the cursor's waiting calls.
+func pendingMessageIDs(cursor *Cursor) []int64 {
+	seen := map[int64]bool{}
+	var ids []int64
+	for _, id := range cursor.PendingCalls {
+		if !seen[id] {
+			seen[id] = true
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
 type mapper struct {
 	session         Session
 	cursor          *Cursor
 	out             []MappedEvent
 	calls           map[string]toolCall
+	callMessage     map[string]int64
 	lastTimestampMS int64
 }
 
@@ -768,6 +896,7 @@ func (m *mapper) mapMessage(message Message) {
 		}
 		for idx, call := range parseToolCalls(message.ToolCalls) {
 			m.calls[call.ID] = call
+			m.callMessage[call.ID] = message.ID
 			ev := m.toolEvent(message.TimestampMS, call, "tool.invoked", "tool", schema.SeverityInfo, "Hermes tool invoked")
 			m.append(message.ID, fmt.Sprintf("tool_call.%d", idx), ev)
 		}
@@ -780,6 +909,7 @@ func (m *mapper) mapMessage(message Message) {
 			call.Name = message.ToolName
 		}
 		delete(m.calls, message.ToolCallID)
+		delete(m.callMessage, message.ToolCallID)
 		m.mapToolResult(message, call)
 	}
 }

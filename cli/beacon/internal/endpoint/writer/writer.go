@@ -66,6 +66,9 @@ func AppendEvent(event schema.Event, opts Options) (string, error) {
 	}
 	if opts.MaxBytes == 0 {
 		opts.MaxBytes = MaxEventBytes
+		if heedvane.EventSink() != nil {
+			opts.MaxBytes = heedvane.SinkMaxEventBytes
+		}
 	}
 	if opts.RotateSize <= 0 {
 		opts.RotateSize = DefaultRotateBytes
@@ -111,6 +114,10 @@ func AppendEvent(event schema.Event, opts Options) (string, error) {
 		if len(stamped) <= opts.MaxBytes {
 			data = stamped
 		}
+	}
+	// Heedvane: the helper reads events from a pipe instead of a log (see heedvane.SetEventSink).
+	if emit := heedvane.EventSink(); emit != nil {
+		return "", emit(data)
 	}
 	line := append(data, '\n')
 	if err := appendJSONL(opts.Path, line, opts.RotateSize, opts.RotateArchives, opts.Guard, opts.Budget); err != nil {

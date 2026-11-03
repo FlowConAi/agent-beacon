@@ -5,6 +5,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"strings"
+
+	"github.com/asymptote-labs/agent-beacon/pkg/asymptoteobserve/heedvane"
 )
 
 // Roles and part types Beacon writes into gen_ai.input.messages and
@@ -178,6 +180,9 @@ func RetainedContent(text string, storeLimit int) *ContentInfo {
 		Included:  true,
 		Hash:      hex.EncodeToString(sum[:]),
 		Bytes:     len(text),
+	}
+	if floor := heedvane.TextLimitFloor(); floor > storeLimit {
+		storeLimit = floor
 	}
 	if storeLimit > 0 && len(text) > storeLimit {
 		info.Truncated = true

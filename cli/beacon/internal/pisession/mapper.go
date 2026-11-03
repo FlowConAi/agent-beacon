@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -783,12 +784,12 @@ func timestampValue(value interface{}) time.Time {
 	return time.Now().UTC()
 }
 
+// floatValueFromString reads a string that is wholly a number. fmt.Sscanf("%f") stopped at the first
+// character that is not part of one, so the ISO timestamp "2026-03-08T20:06:49Z" read as 2026 and
+// dated the event 33 minutes after the epoch.
 func floatValueFromString(value string) (float64, bool) {
-	var out float64
-	if _, err := fmt.Sscanf(strings.TrimSpace(value), "%f", &out); err != nil {
-		return 0, false
-	}
-	return out, true
+	out, err := strconv.ParseFloat(strings.TrimSpace(value), 64)
+	return out, err == nil
 }
 
 func refTimestamp(ref SessionRef) time.Time {

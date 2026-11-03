@@ -59,6 +59,17 @@ type endpointBackfillRun struct {
 	UserMode bool
 	Since    time.Time
 	Budget   *writer.Budget
+	// StateDir, when set, holds every runtime's cursor file instead of the runtime's own default, so
+	// the Heedvane helper's reads share no cursor with an upstream Beacon on the same machine.
+	StateDir string
+}
+
+// statePath is where one runtime keeps its cursor: its own default, or the same file name under StateDir.
+func (r endpointBackfillRun) statePath(runtimeDefault string) string {
+	if r.StateDir == "" {
+		return runtimeDefault
+	}
+	return filepath.Join(r.StateDir, filepath.Base(runtimeDefault))
 }
 
 // endpointBackfillRunner is one session-store collector.
@@ -78,59 +89,59 @@ type endpointBackfillRunner struct {
 var endpointBackfillRunners = func() []endpointBackfillRunner {
 	return []endpointBackfillRunner{
 		{Name: "Claude Code", Sync: "beacon endpoint claude sync", Run: func(r endpointBackfillRun) (int, error) {
-			s, err := claudesession.CollectOnce(claudesession.CollectOptions{Write: true, UserMode: r.UserMode, LogPath: r.LogPath, StatePath: resolveClaudeStatePath("", r.UserMode), Since: r.Since, Budget: r.Budget})
+			s, err := claudesession.CollectOnce(claudesession.CollectOptions{Write: true, UserMode: r.UserMode, LogPath: r.LogPath, StatePath: r.statePath(resolveClaudeStatePath("", r.UserMode)), Since: r.Since, Budget: r.Budget})
 			return s.EventsEmitted, err
 		}},
 		{Name: "Codex CLI", Sync: "beacon endpoint codex sync", Run: func(r endpointBackfillRun) (int, error) {
-			s, err := codexsession.CollectOnce(codexsession.CollectOptions{Write: true, UserMode: r.UserMode, LogPath: r.LogPath, StatePath: resolveCodexStatePath("", r.UserMode), Since: r.Since, Budget: r.Budget})
+			s, err := codexsession.CollectOnce(codexsession.CollectOptions{Write: true, UserMode: r.UserMode, LogPath: r.LogPath, StatePath: r.statePath(resolveCodexStatePath("", r.UserMode)), Since: r.Since, Budget: r.Budget})
 			return s.EventsEmitted, err
 		}},
 		{Name: "Cursor", Sync: "beacon endpoint cursor sync", Run: func(r endpointBackfillRun) (int, error) {
-			s, err := cursorsession.CollectOnce(cursorsession.CollectOptions{Write: true, UserMode: r.UserMode, LogPath: r.LogPath, StatePath: resolveCursorStatePath("", r.UserMode), Since: r.Since, Budget: r.Budget})
+			s, err := cursorsession.CollectOnce(cursorsession.CollectOptions{Write: true, UserMode: r.UserMode, LogPath: r.LogPath, StatePath: r.statePath(resolveCursorStatePath("", r.UserMode)), Since: r.Since, Budget: r.Budget})
 			return s.EventsEmitted, err
 		}},
 		{Name: "OpenCode", Sync: "beacon endpoint opencode sync", Run: func(r endpointBackfillRun) (int, error) {
-			s, err := opencodesession.CollectOnce(opencodesession.CollectOptions{Write: true, UserMode: r.UserMode, LogPath: r.LogPath, StatePath: resolveOpenCodeStatePath("", r.UserMode), Since: r.Since, Budget: r.Budget})
+			s, err := opencodesession.CollectOnce(opencodesession.CollectOptions{Write: true, UserMode: r.UserMode, LogPath: r.LogPath, StatePath: r.statePath(resolveOpenCodeStatePath("", r.UserMode)), Since: r.Since, Budget: r.Budget})
 			return s.EventsEmitted, err
 		}},
 		{Name: "GitHub Copilot CLI", Sync: "beacon endpoint copilot sync", Run: func(r endpointBackfillRun) (int, error) {
-			s, err := copilotsession.CollectOnce(copilotsession.CollectOptions{Write: true, UserMode: r.UserMode, LogPath: r.LogPath, StatePath: resolveCopilotStatePath("", r.UserMode), Since: r.Since, Budget: r.Budget})
+			s, err := copilotsession.CollectOnce(copilotsession.CollectOptions{Write: true, UserMode: r.UserMode, LogPath: r.LogPath, StatePath: r.statePath(resolveCopilotStatePath("", r.UserMode)), Since: r.Since, Budget: r.Budget})
 			return s.EventsEmitted, err
 		}},
 		{Name: "Cline", Sync: "beacon endpoint cline sync", Run: func(r endpointBackfillRun) (int, error) {
-			s, err := clinesession.CollectOnce(clinesession.CollectOptions{Write: true, UserMode: r.UserMode, LogPath: r.LogPath, StatePath: resolveClineStatePath("", r.UserMode), Since: r.Since, Budget: r.Budget})
+			s, err := clinesession.CollectOnce(clinesession.CollectOptions{Write: true, UserMode: r.UserMode, LogPath: r.LogPath, StatePath: r.statePath(resolveClineStatePath("", r.UserMode)), Since: r.Since, Budget: r.Budget})
 			return s.EventsEmitted, err
 		}},
 		{Name: "Factory Droid", Sync: "beacon endpoint factory sync", Run: func(r endpointBackfillRun) (int, error) {
-			s, err := factorysession.CollectOnce(factorysession.CollectOptions{Write: true, UserMode: r.UserMode, LogPath: r.LogPath, StatePath: resolveFactoryStatePath("", r.UserMode), Since: r.Since, Budget: r.Budget})
+			s, err := factorysession.CollectOnce(factorysession.CollectOptions{Write: true, UserMode: r.UserMode, LogPath: r.LogPath, StatePath: r.statePath(resolveFactoryStatePath("", r.UserMode)), Since: r.Since, Budget: r.Budget})
 			return s.EventsEmitted, err
 		}},
 		{Name: "Pi", Sync: "beacon endpoint pi sync", Run: func(r endpointBackfillRun) (int, error) {
-			s, err := pisession.CollectOnce(pisession.CollectOptions{Write: true, UserMode: r.UserMode, LogPath: r.LogPath, StatePath: resolvePiStatePath("", r.UserMode), Since: r.Since, Budget: r.Budget})
+			s, err := pisession.CollectOnce(pisession.CollectOptions{Write: true, UserMode: r.UserMode, LogPath: r.LogPath, StatePath: r.statePath(resolvePiStatePath("", r.UserMode)), Since: r.Since, Budget: r.Budget})
 			return s.EventsEmitted, err
 		}},
 		{Name: "Prime Agent", Sync: "beacon endpoint prime sync", Run: func(r endpointBackfillRun) (int, error) {
-			s, err := primesession.CollectOnce(primesession.CollectOptions{Write: true, UserMode: r.UserMode, LogPath: r.LogPath, StatePath: resolvePrimeStatePath("", r.UserMode), Since: r.Since, Budget: r.Budget})
+			s, err := primesession.CollectOnce(primesession.CollectOptions{Write: true, UserMode: r.UserMode, LogPath: r.LogPath, StatePath: r.statePath(resolvePrimeStatePath("", r.UserMode)), Since: r.Since, Budget: r.Budget})
 			return s.EventsEmitted, err
 		}},
 		{Name: "Hermes Agent", Sync: "beacon endpoint hermes sync", Run: func(r endpointBackfillRun) (int, error) {
-			s, err := hermessession.CollectOnce(hermessession.CollectOptions{Write: true, UserMode: r.UserMode, LogPath: r.LogPath, StatePath: resolveHermesStatePath("", r.UserMode), Since: r.Since, Budget: r.Budget})
+			s, err := hermessession.CollectOnce(hermessession.CollectOptions{Write: true, UserMode: r.UserMode, LogPath: r.LogPath, StatePath: r.statePath(resolveHermesStatePath("", r.UserMode)), Since: r.Since, Budget: r.Budget})
 			return s.EventsEmitted, err
 		}},
 		{Name: "DeepSeek Harness", Sync: "beacon endpoint dsh sync", Run: func(r endpointBackfillRun) (int, error) {
-			s, err := dshsession.CollectOnce(dshsession.CollectOptions{Write: true, UserMode: r.UserMode, LogPath: r.LogPath, StatePath: resolveDshStatePath("", r.UserMode), Since: r.Since, Budget: r.Budget})
+			s, err := dshsession.CollectOnce(dshsession.CollectOptions{Write: true, UserMode: r.UserMode, LogPath: r.LogPath, StatePath: r.statePath(resolveDshStatePath("", r.UserMode)), Since: r.Since, Budget: r.Budget})
 			return s.EventsEmitted, err
 		}},
 		{Name: "fx", Sync: "beacon endpoint fx sync", Run: func(r endpointBackfillRun) (int, error) {
-			s, err := fxsession.CollectOnce(fxsession.CollectOptions{Write: true, UserMode: r.UserMode, LogPath: r.LogPath, StatePath: resolveFxStatePath("", r.UserMode), Since: r.Since, Budget: r.Budget})
+			s, err := fxsession.CollectOnce(fxsession.CollectOptions{Write: true, UserMode: r.UserMode, LogPath: r.LogPath, StatePath: r.statePath(resolveFxStatePath("", r.UserMode)), Since: r.Since, Budget: r.Budget})
 			return s.EventsEmitted, err
 		}},
 		{Name: "Grok Build", Sync: "beacon endpoint grok sync", Run: func(r endpointBackfillRun) (int, error) {
-			s, err := groksession.CollectOnce(groksession.CollectOptions{Write: true, UserMode: r.UserMode, LogPath: r.LogPath, StatePath: resolveGrokStatePath("", r.UserMode), Since: r.Since, Budget: r.Budget})
+			s, err := groksession.CollectOnce(groksession.CollectOptions{Write: true, UserMode: r.UserMode, LogPath: r.LogPath, StatePath: r.statePath(resolveGrokStatePath("", r.UserMode)), Since: r.Since, Budget: r.Budget})
 			return s.EventsEmitted, err
 		}},
 		{Name: "OpenClaw Gateway", Sync: "beacon endpoint integrations openclaw sessions sync", Run: func(r endpointBackfillRun) (int, error) {
-			s, err := openclawsession.CollectOnce(openclawsession.CollectOptions{Write: true, UserMode: r.UserMode, LogPath: r.LogPath, StatePath: resolveOpenClawSessionsStatePath("", r.UserMode), Since: r.Since, Budget: r.Budget})
+			s, err := openclawsession.CollectOnce(openclawsession.CollectOptions{Write: true, UserMode: r.UserMode, LogPath: r.LogPath, StatePath: r.statePath(resolveOpenClawSessionsStatePath("", r.UserMode)), Since: r.Since, Budget: r.Budget})
 			return s.EventsEmitted, err
 		}},
 	}

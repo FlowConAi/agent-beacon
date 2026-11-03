@@ -500,6 +500,43 @@ func TestCollectOnceUpgradesAnUpstreamCursorWhoseResultIsStillMissing(t *testing
 	requireCommandRan(t, logPath)
 }
 
+// When Hermes cannot answer the lookup that upgrades an upstream cursor (here: the column it reads is missing, a
+// real SQL error after the sessions were listed), the sweep fails, and the state it still saves must hold no
+// arguments, for the session that failed and for one it never reached. The next sweep finds the call and the
+// result is classified with its command.
+func TestCollectOnceWritesNoArgumentsWhenTheUpstreamUpgradeFails(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "state.db")
+	createHermesFixtureDB(t, dbPath)
+	logPath := filepath.Join(dir, "runtime.jsonl")
+	statePath := filepath.Join(dir, "hermes-state.json")
+	secondSession := `"hermes-session-2": {"last_message_id": 9, "pending_calls": {"call_other": {"id": "call_other", "name": "terminal", "arguments": {"command": "echo second-session-secret"}}}},`
+	state := strings.Replace(upstreamStateWithWaitingCall, `"sessions": {`, `"sessions": {`+secondSession, 1)
+	if err := os.WriteFile(statePath, []byte(state), 0o600); err != nil {
+		t.Fatalf("write upstream state: %v", err)
+	}
+	opts := CollectOptions{DBPath: dbPath, StatePath: statePath, LogPath: logPath, Write: true, UserMode: true}
+
+	execHermes(t, dbPath, `ALTER TABLE messages RENAME COLUMN tool_calls TO tool_calls_away;`)
+	if _, err := CollectOnce(opts); err == nil {
+		t.Fatal("CollectOnce succeeded although the lookup of the waiting call failed")
+	}
+	saved := requireStateHoldsNoArguments(t, statePath)
+	if strings.Contains(saved, "second-session-secret") {
+		t.Fatalf("state file holds the other session's arguments: %s", saved)
+	}
+	if !strings.Contains(saved, "call_terminal") {
+		t.Fatalf("state = %s, want the waiting call kept by its id so the next sweep can retry", saved)
+	}
+
+	execHermes(t, dbPath, `ALTER TABLE messages RENAME COLUMN tool_calls_away TO tool_calls;`)
+	if _, err := CollectOnce(opts); err != nil {
+		t.Fatalf("CollectOnce after Hermes answers again returned error: %v", err)
+	}
+	requireCommandRan(t, logPath)
+	requireStateHoldsNoArguments(t, statePath)
+}
+
 // Hermes compaction keeps a compacted row with active = 0. A call whose message was compacted between two sweeps
 // still has its arguments there, and its result must be classified with them.
 func TestCollectOnceReadsAWaitingCallThatHermesArchivedBetweenSweeps(t *testing.T) {

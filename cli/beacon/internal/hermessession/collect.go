@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -47,10 +48,30 @@ type Cursor struct {
 	// Hermes's own store and are read from there again, so this file carries what resumes reading and nothing of
 	// what the session did.
 	PendingCalls map[string]int64 `json:"pending_call_messages,omitempty"`
-	// LegacyPendingCalls is how earlier versions saved the same calls, with their full arguments. It is only read:
-	// upgradeLegacyPending turns it into PendingCalls before anything newer is consumed and clears it, so it is
-	// never written back.
-	LegacyPendingCalls map[string]json.RawMessage `json:"pending_calls,omitempty"`
+	// UnresolvedCalls are calls an earlier version saved whole under `pending_calls`, whose message in Hermes has
+	// not been found yet. Only their ids are kept, as migration metadata: UnmarshalJSON drops the arguments while
+	// reading, so nothing can write them back, and upgradeLegacyPending retries the ones that failed.
+	UnresolvedCalls []string `json:"pending_call_ids,omitempty"`
+}
+
+// UnmarshalJSON reads a cursor and, from the old `pending_calls` field, takes only the call ids. The arguments
+// that field holds are decoded away here, at the one place a state is read, so no later failure can serialize them.
+func (c *Cursor) UnmarshalJSON(data []byte) error {
+	type plain Cursor
+	stored := struct {
+		*plain
+		Legacy map[string]json.RawMessage `json:"pending_calls"`
+	}{plain: (*plain)(c)}
+	if err := json.Unmarshal(data, &stored); err != nil {
+		return err
+	}
+	for id := range stored.Legacy {
+		if !slices.Contains(c.UnresolvedCalls, id) {
+			c.UnresolvedCalls = append(c.UnresolvedCalls, id)
+		}
+	}
+	slices.Sort(c.UnresolvedCalls)
+	return nil
 }
 
 type State struct {
@@ -300,16 +321,15 @@ func CollectOnce(opts CollectOptions) (summary Summary, err error) {
 
 // upgradeLegacyPending turns the waiting calls an earlier version saved with their full arguments into the
 // message ids this one keeps, by finding the message in Hermes that holds each call. It runs before any newer
-// result is read, so a result that arrives after an upgrade is still classified with the command it ran, and the
-// next save carries no arguments. A call whose message Hermes no longer has is dropped.
+// result is read, so a result that arrives after an upgrade is still classified with the command it ran. A call
+// whose message Hermes no longer has is dropped. When a lookup fails, the ids not yet resolved stay in the cursor
+// (ids only, never arguments) and the sweep ends, so the next one retries and the saved file holds no arguments.
 func upgradeLegacyPending(store *Store, state *State) error {
 	for sessionID, cursor := range state.Sessions {
-		if len(cursor.LegacyPendingCalls) == 0 {
-			continue
-		}
-		for callID := range cursor.LegacyPendingCalls {
+		for i, callID := range cursor.UnresolvedCalls {
 			messageID, found, err := store.MessageHoldingCall(sessionID, callID, cursor.LastMessageID)
 			if err != nil {
+				cursor.UnresolvedCalls = cursor.UnresolvedCalls[i:]
 				return fmt.Errorf("find the message of waiting call %s in Hermes session %s: %w", callID, sessionID, err)
 			}
 			if found {
@@ -319,7 +339,7 @@ func upgradeLegacyPending(store *Store, state *State) error {
 				cursor.PendingCalls[callID] = messageID
 			}
 		}
-		cursor.LegacyPendingCalls = nil
+		cursor.UnresolvedCalls = nil
 	}
 	return nil
 }

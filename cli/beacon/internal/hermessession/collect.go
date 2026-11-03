@@ -47,6 +47,10 @@ type Cursor struct {
 	// Hermes's own store and are read from there again, so this file carries what resumes reading and nothing of
 	// what the session did.
 	PendingCalls map[string]int64 `json:"pending_call_messages,omitempty"`
+	// LegacyPendingCalls is how earlier versions saved the same calls, with their full arguments. It is only read:
+	// upgradeLegacyPending turns it into PendingCalls before anything newer is consumed and clears it, so it is
+	// never written back.
+	LegacyPendingCalls map[string]json.RawMessage `json:"pending_calls,omitempty"`
 }
 
 type State struct {
@@ -264,6 +268,9 @@ func CollectOnce(opts CollectOptions) (summary Summary, err error) {
 			err = fmt.Errorf("save Hermes collector state: %w", saveErr)
 		}
 	}()
+	if err := upgradeLegacyPending(store, state); err != nil {
+		return summary, err
+	}
 	var errs []error
 	for _, session := range sessions {
 		changed, collectErr := collectSession(store, session, state, opts, &summary)
@@ -289,6 +296,32 @@ func CollectOnce(opts CollectOptions) (summary Summary, err error) {
 		return summary, errors.Join(errs...)
 	}
 	return summary, nil
+}
+
+// upgradeLegacyPending turns the waiting calls an earlier version saved with their full arguments into the
+// message ids this one keeps, by finding the message in Hermes that holds each call. It runs before any newer
+// result is read, so a result that arrives after an upgrade is still classified with the command it ran, and the
+// next save carries no arguments. A call whose message Hermes no longer has is dropped.
+func upgradeLegacyPending(store *Store, state *State) error {
+	for sessionID, cursor := range state.Sessions {
+		if len(cursor.LegacyPendingCalls) == 0 {
+			continue
+		}
+		for callID := range cursor.LegacyPendingCalls {
+			messageID, found, err := store.MessageHoldingCall(sessionID, callID, cursor.LastMessageID)
+			if err != nil {
+				return fmt.Errorf("find the message of waiting call %s in Hermes session %s: %w", callID, sessionID, err)
+			}
+			if found {
+				if cursor.PendingCalls == nil {
+					cursor.PendingCalls = map[string]int64{}
+				}
+				cursor.PendingCalls[callID] = messageID
+			}
+		}
+		cursor.LegacyPendingCalls = nil
+	}
+	return nil
 }
 
 func collectSession(store *Store, session Session, state *State, opts CollectOptions, summary *Summary) (bool, error) {
@@ -465,7 +498,8 @@ ORDER BY id`, sessionID, afterID)
 }
 
 // ReadMessagesByID reads the messages with these ids, which hold the arguments of the tool calls that are
-// still waiting for a result.
+// still waiting for a result. It reads them whether or not they are active: Hermes keeps a compacted row with
+// active = 0, and a call compacted since the last sweep still has to be classified with the command it ran.
 func (s *Store) ReadMessagesByID(sessionID string, ids []int64) ([]Message, error) {
 	if len(ids) == 0 {
 		return nil, nil
@@ -477,12 +511,35 @@ func (s *Store) ReadMessagesByID(sessionID string, ids []int64) ([]Message, erro
 		args = append(args, id)
 	}
 	rows, err := s.db.Query(messagesQuery+`
-WHERE session_id = ? AND active = 1 AND id IN (`+marks+`)
+WHERE session_id = ? AND id IN (`+marks+`)
 ORDER BY id`, args...)
 	if err != nil {
 		return nil, err
 	}
 	return scanMessages(rows)
+}
+
+// MessageHoldingCall finds the id of the latest message up to upToID whose tool calls include callID, active or
+// not, so a cursor saved with a call's full arguments can be turned into the id of the message that holds them.
+func (s *Store) MessageHoldingCall(sessionID, callID string, upToID int64) (int64, bool, error) {
+	rows, err := s.db.Query(messagesQuery+`
+WHERE session_id = ? AND id <= ? AND instr(tool_calls, ?) > 0
+ORDER BY id DESC`, sessionID, upToID, callID)
+	if err != nil {
+		return 0, false, err
+	}
+	messages, err := scanMessages(rows)
+	if err != nil {
+		return 0, false, err
+	}
+	for _, message := range messages {
+		for _, call := range parseToolCalls(message.ToolCalls) {
+			if call.ID == callID {
+				return message.ID, true, nil
+			}
+		}
+	}
+	return 0, false, nil
 }
 
 const messagesQuery = `

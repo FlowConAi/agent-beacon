@@ -1,0 +1,77 @@
+name: Release Heedvane Beacon
+
+# One release of the Beacon binary that `npx heedvane` downloads: five builds (macOS arm64 and x64,
+# Linux arm64 and x64, Windows x64), their checksums and the manifest the installer reads.
+#
+# Answers only to `heedvane-v*` tags, which the upstream release workflow (`v*` tags, signing secrets,
+# Homebrew) never matches, or to a run started by hand with a version. It signs and notarizes nothing:
+# the Go linker signs the arm64 builds ad hoc, which is all the kernel asks of a command line program
+# the installer downloads itself.
+
+on:
+  push:
+    tags:
+      - "heedvane-v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version without the prefix, for example 0.1.0 (released as the tag heedvane-v0.1.0)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ github.event.inputs.version || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: cli/beacon/go.mod
+
+      - name: Version
+        id: version
+        run: |
+          set -euo pipefail
+          version="${VERSION#heedvane-v}"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=heedvane-v$version" >> "$GITHUB_OUTPUT"
+
+      - name: Tests of the Heedvane adapter
+        run: |
+          cd cli/beacon
+          go vet ./cmd ./internal/pisession ./internal/endpoint/writer
+          go test ./cmd ./internal/pisession ./internal/endpoint/writer -run 'Heedvane|Sink|Iso|FloatValue' -count=1
+          cd ../../pkg/asymptoteobserve
+          go test ./heedvane -count=1
+
+      - name: Build the five binaries, checksums and manifest
+        run: packaging/heedvane/build-release.sh "${{ steps.version.outputs.version }}" dist
+
+      - name: The Linux build runs, and answers the command the helper uses
+        run: |
+          set -euo pipefail
+          binary="dist/beacon_${{ steps.version.outputs.version }}_linux_amd64"
+          gunzip -k "$binary.gz"
+          chmod +x "$binary"
+          "$binary" version | tee version.txt
+          grep -F "${{ steps.version.outputs.version }}" version.txt
+          mkdir -p "$RUNNER_TEMP/state"
+          HOME="$RUNNER_TEMP/home" "$binary" heedvane sync --state-dir "$RUNNER_TEMP/state" --skip claude,codex > "$RUNNER_TEMP/events.jsonl"
+          test ! -s "$RUNNER_TEMP/events.jsonl"
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${{ steps.version.outputs.tag }}"
+          gh release create "$tag" dist/beacon_*.gz dist/checksums.txt dist/heedvane-beacon.json \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "Heedvane Beacon ${{ steps.version.outputs.version }}" \
+            --notes "The Beacon build that npx heedvane installs. checksums.txt lists the sha256 of every file; heedvane-beacon.json is the manifest the installer reads."

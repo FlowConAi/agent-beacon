@@ -302,6 +302,9 @@ func TruncateUTF8(value string, limit int) string {
 }
 
 func TruncateString(value string, limit int) string {
+	if floor := heedvane.TextLimitFloor(); floor > limit {
+		limit = floor
+	}
 	if len(value) <= limit {
 		return value
 	}
@@ -315,6 +318,9 @@ func TruncateString(value string, limit int) string {
 // Redaction reads only a window past the limit, which keeps a multi-megabyte command output as
 // cheap as before.
 func CleanString(value string, limit int, redactSecrets bool) string {
+	if floor := heedvane.TextLimitFloor(); floor > limit {
+		limit = floor
+	}
 	if !redactSecrets {
 		return TruncateString(value, limit)
 	}

@@ -111,7 +111,7 @@ func TestMapSessionClassifiesFileTool(t *testing.T) {
 		},
 	}
 
-	mapped, _ := MapSession(session, messages, &Cursor{Started: true})
+	mapped, _ := MapSession(session, messages, &Cursor{Started: true}, nil)
 	fileEvent := findMappedAction(t, mapped, "file.read")
 	if fileEvent.File == nil || fileEvent.File.Path != "README.md" || fileEvent.File.Operation != "read" {
 		t.Fatalf("file event = %#v, want README.md read", fileEvent.File)
@@ -342,6 +342,17 @@ UPDATE sessions SET ended_at = NULL, end_reason = NULL WHERE id = 'hermes-sessio
 	if cursor == nil || len(cursor.PendingCalls) != 1 {
 		db.Close()
 		t.Fatalf("cursor = %#v, want the unresolved call carried on the cursor", cursor)
+	}
+	// The state file holds what resumes reading, never what the session ran: the call's arguments stay in
+	// Hermes's own store and are read from there on the next sweep.
+	rawState, err := os.ReadFile(statePath)
+	if err != nil {
+		db.Close()
+		t.Fatalf("read state file: %v", err)
+	}
+	if strings.Contains(string(rawState), "go test") || strings.Contains(string(rawState), "arguments") {
+		db.Close()
+		t.Fatalf("state file holds the call's arguments: %s", rawState)
 	}
 
 	if _, err := db.Exec(`

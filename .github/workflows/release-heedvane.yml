@@ -82,7 +82,11 @@ jobs:
 
       - name: Tests of the Heedvane adapter
         run: |
+          # The CLI embeds a hooks binary that is built, not committed; its tests need a real one, as in ci.yml.
+          # It is removed afterwards, so the five builds embed the placeholder build-release.sh writes.
+          trap 'rm -f "$GITHUB_WORKSPACE/cli/beacon/internal/embedded/hooks.bin"' EXIT
           cd cli/beacon
+          make build-hooks-current
           go vet ./cmd ./internal/pisession ./internal/endpoint/writer
           go test ./cmd ./internal/pisession ./internal/endpoint/writer -run 'Heedvane|Sink|Iso|FloatValue' -count=1
           cd ../../pkg/asymptoteobserve
